@@ -1,0 +1,112 @@
+INFO:     Started server process [7100]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:59623 - "WebSocket /v1/transcribe/stream" [accepted]
+INFO:     connection open
+[NeMo W 2026-08-28 17:28:23 <frozen importlib:241] Megatron num_microbatches_calculator not found, using Apex version.
+W0828 17:28:23.755000 7100 C:\Users\ARAVIND ES\Projects\goals\.venv\Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+OneLogger: Setting error_handling_strategy to DISABLE_QUIETLY_AND_REPORT_METRIC_ERROR for rank (rank=0) with OneLogger disabled. To override: explicitly set error_handling_strategy parameter.
+No exporters were provided. This means that no telemetry data will be collected.
+[NeMo W 2026-08-28 17:28:38 rnnt_models:63] If you intend to do training or fine-tuning, please call the ModelPT.setup_training_data() method and provide a valid configuration file to setup the train data loader.
+    Train config : 
+    use_lhotse: true
+    skip_missing_manifest_entries: true
+    input_cfg: null
+    tarred_audio_filepaths: null
+    manifest_filepath: null
+    sample_rate: 16000
+    shuffle: true
+    num_workers: 2
+    pin_memory: true
+    max_duration: 40.0
+    min_duration: 0.1
+    text_field: answer
+    batch_duration: null
+    use_bucketing: true
+    bucket_duration_bins: null
+    bucket_batch_size: null
+    num_buckets: 30
+    bucket_buffer_size: 20000
+    shuffle_buffer_size: 10000
+    
+[NeMo W 2026-08-28 17:28:38 rnnt_models:63] If you intend to do validation, please call the ModelPT.setup_validation_data() or ModelPT.setup_multiple_validation_data() method and provide a valid configuration file to setup the validation data loader(s). 
+    Validation config : 
+    use_lhotse: true
+    manifest_filepath: null
+    sample_rate: 16000
+    batch_size: 16
+    shuffle: false
+    max_duration: 40.0
+    min_duration: 0.1
+    num_workers: 2
+    pin_memory: true
+    text_field: answer
+    
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "C:\aravind\Projects\asr\clinical_asr\main.py", line 60, in transcribe
+    message = await websocket.receive()
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\websockets.py", line 57, in receive
+    raise RuntimeError('Cannot call "receive" once a disconnect message has been received.')
+RuntimeError: Cannot call "receive" once a disconnect message has been received.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\websockets.py", line 86, in send
+    await self._send(message)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\_exception_handler.py", line 39, in sender
+    await send(message)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\uvicorn\protocols\websockets\websockets_sansio_impl.py", line 436, in send
+    raise ClientDisconnected()
+uvicorn.protocols.utils.ClientDisconnected
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\uvicorn\protocols\websockets\websockets_sansio_impl.py", line 409, in run_asgi
+    result = await self.app(self.scope, self.receive, self.send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\uvicorn\middleware\proxy_headers.py", line 63, in __call__
+    return await self.app(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\fastapi\applications.py", line 1163, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\applications.py", line 96, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\middleware\errors.py", line 151, in __call__
+    await self.app(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\routing.py", line 670, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\fastapi\routing.py", line 2734, in app
+    await route.handle(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\routing.py", line 354, in handle
+    await self.app(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\fastapi\routing.py", line 184, in app
+    await wrap_app_handling_exceptions(app, session)(scope, receive, send)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\fastapi\routing.py", line 181, in app
+    await func(session)
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\fastapi\routing.py", line 796, in app
+    await dependant.call(**solved_result.values)
+  File "C:\aravind\Projects\asr\clinical_asr\main.py", line 99, in transcribe
+    await websocket.send_json(TranscriptEvent(type="error", error=str(exc), session_id=session_id).to_dict())
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\websockets.py", line 176, in send_json
+    await self.send({"type": "websocket.send", "text": text})
+  File "C:\aravind\Projects\goals\.venv\lib\site-packages\starlette\websockets.py", line 89, in send
+    raise WebSocketDisconnect(code=1006)
+starlette.websockets.WebSocketDisconnect
+INFO:     127.0.0.1:65228 - "WebSocket /v1/transcribe/stream" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:57840 - "WebSocket /v1/transcribe/stream" [accepted]
+INFO:     connection open

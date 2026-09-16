@@ -1,0 +1,7 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9,<1
+pytest>=8,<9
+httpx>=0.27,<1
+# Install separately when using ASR_BACKEND=parakeet; it brings the local model runtime.
+# nemo_toolkit[asr]>=2.5,<3

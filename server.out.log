@@ -1,0 +1,13 @@
+INFO:     127.0.0.1:56394 - "GET /health HTTP/1.1" 200 OK
+[NeMo I 2026-08-28 17:28:38 mixins:69] Tokenizer SentencePieceTokenizer initialized with 1024 tokens
+[NeMo I 2026-08-28 17:28:43 rnnt_models:83] Using RNNT Loss : tdt
+    Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+[NeMo I 2026-08-28 17:28:43 rnnt_models:231] Using RNNT Loss : tdt
+    Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+[NeMo I 2026-08-28 17:28:43 rnnt_models:231] Using RNNT Loss : tdt
+    Loss tdt_kwargs: {'fastemit_lambda': 0.0, 'clamp': -1.0, 'durations': [0, 1, 2, 3, 4], 'sigma': 0.02, 'omega': 0.1}
+[NeMo I 2026-08-28 17:28:49 modelPT:501] Model EncDecRNNTBPEModel was successfully restored from C:\aravind\Projects\asr\models\parakeet\parakeet-tdt-0.6b-v2.nemo.
+INFO:     127.0.0.1:55512 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55512 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64628 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64628 - "GET / HTTP/1.1" 200 OK

@@ -1,0 +1,12 @@
+{
+  "version": "medical-vocab-demo-1.0.0",
+  "terms": [
+    {"canonical_name": "ramipril", "category": "medication", "aliases": ["ram a pro", "ramipril"], "phonetic_variants": ["ram a prill"]},
+    {"canonical_name": "amlodipine", "category": "medication", "aliases": ["amlodipine"]},
+    {"canonical_name": "metformin", "category": "medication", "aliases": ["metformin"]},
+    {"canonical_name": "atorvastatin", "category": "medication", "aliases": ["atorvastatin"]},
+    {"canonical_name": "milligrams", "category": "dosage_unit", "aliases": ["milligram", "mg"]},
+    {"canonical_name": "once daily", "category": "frequency", "aliases": ["once a day", "od"]},
+    {"canonical_name": "oral", "category": "route", "aliases": ["by mouth", "po"]}
+  ]
+}

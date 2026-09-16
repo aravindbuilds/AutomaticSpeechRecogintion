@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Offline Clinical ASR</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; --ink: #17324d; --accent: #d45b38; --wash: #f4efe7; }
+    body { margin: 0; color: var(--ink); background: radial-gradient(circle at top right, #e5efe9, var(--wash) 48%, #efe0d5); min-height: 100vh; }
+    main { max-width: 860px; margin: auto; padding: 8vh 6vw; }
+    h1 { font-size: clamp(2rem, 6vw, 4.8rem); line-height: .95; max-width: 8ch; margin: 0 0 1rem; letter-spacing: 0; }
+    p { max-width: 58ch; line-height: 1.5; }
+    .toolbar { display: flex; gap: .75rem; flex-wrap: wrap; margin: 2rem 0; }
+    button { border: 0; border-radius: 6px; padding: .8rem 1rem; background: var(--ink); color: white; cursor: pointer; font: inherit; }
+    button.secondary { background: var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    #status { font-weight: 700; min-height: 1.5em; }
+    #activity { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .5rem; margin: 1rem 0 2rem; }
+    .metric { padding: .75rem; background: rgba(255,255,255,.55); border-top: 3px solid var(--accent); }
+    .metric small { display: block; opacity: .7; }
+    .metric strong { display: block; margin-top: .25rem; }
+    #transcript { min-height: 10rem; padding: 1.25rem; background: rgba(255,255,255,.72); border-left: 5px solid var(--accent); font-size: 1.35rem; line-height: 1.5; }
+    #events { font: .8rem ui-monospace, monospace; white-space: pre-wrap; max-height: 12rem; overflow: auto; opacity: .75; }
+  </style>
+</head>
+<body>
+<main>
+  <p id="status">Disconnected</p>
+  <h1>Clinical speech, kept local.</h1>
+  <p>Allow microphone access to stream 16 kHz mono PCM locally to the ASR service. Audio is not uploaded anywhere.</p>
+  <div class="toolbar">
+    <button id="start">Start microphone</button>
+    <button id="demo" class="secondary" disabled>Use demo phrase</button>
+    <button id="finish" disabled>Finalize</button>
+  </div>
+  <section id="activity" aria-live="polite">
+    <div class="metric"><small>Model</small><strong id="modelState">Not connected</strong></div>
+    <div class="metric"><small>Audio</small><strong id="audioState">0 bytes</strong></div>
+    <div class="metric"><small>Inference</small><strong id="inferenceState">Idle</strong></div>
+    <div class="metric"><small>Backend</small><strong id="backendState">Unknown</strong></div>
+  </section>
+  <section id="transcript" aria-live="polite">Waiting for a session.</section>
+  <pre id="events"></pre>
+</main>
+<script>
+  let socket;
+  let microphone;
+  let audioContext;
+  let processor;
+  let source;
+  let loadingTimer;
+  let loadingStarted;
+  const status = document.querySelector('#status');
+  const transcript = document.querySelector('#transcript');
+  const events = document.querySelector('#events');
+  const start = document.querySelector('#start');
+  const demo = document.querySelector('#demo');
+  const finish = document.querySelector('#finish');
+  const modelState = document.querySelector('#modelState');
+  const audioState = document.querySelector('#audioState');
+  const inferenceState = document.querySelector('#inferenceState');
+  const backendState = document.querySelector('#backendState');
+  function downsample(buffer, inputRate, outputRate) {
+    if (inputRate === outputRate) return buffer;
+    const ratio = inputRate / outputRate;
+    const outputLength = Math.round(buffer.length / ratio);
+    const output = new Float32Array(outputLength);
+    for (let i = 0; i < outputLength; i++) {
+      const position = i * ratio;
+      const left = Math.floor(position);
+      const right = Math.min(left + 1, buffer.length - 1);
+      const weight = position - left;
+      output[i] = buffer[left] * (1 - weight) + buffer[right] * weight;
+    }
+    return output;
+  }
+
+  function floatToPcm16(samples) {
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const value = Math.max(-1, Math.min(1, samples[i]));
+      pcm[i] = value < 0 ? value * 32768 : value * 32767;
+    }
+    return pcm.buffer;
+  }
+
+  function stopMicrophone() {
+    if (processor) processor.disconnect();
+    if (source) source.disconnect();
+    if (microphone) microphone.getTracks().forEach(track => track.stop());
+    processor = null;
+    source = null;
+    microphone = null;
+  }
+
+  function stopLoadingTimer() {
+    if (loadingTimer) clearInterval(loadingTimer);
+    loadingTimer = null;
+  }
+
+  function startLoadingTimer() {
+    loadingStarted = performance.now();
+    stopLoadingTimer();
+    loadingTimer = setInterval(() => {
+      modelState.textContent = `Loading (${Math.round((performance.now() - loadingStarted) / 1000)}s)`;
+    }, 250);
+  }
+
+  async function connect(useMicrophone) {
+    socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/v1/transcribe/stream`);
+    socket.binaryType = 'arraybuffer';
+    socket.onopen = async () => {
+      status.textContent = useMicrophone ? 'Requesting microphone...' : 'Connected';
+      demo.disabled = false;
+      finish.disabled = false;
+      start.disabled = true;
+      if (!useMicrophone) return;
+      try {
+        microphone = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+        audioContext = new AudioContext();
+        source = audioContext.createMediaStreamSource(microphone);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = event => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          const mono = event.inputBuffer.getChannelData(0);
+          socket.send(floatToPcm16(downsample(mono, audioContext.sampleRate, 16000)));
+        };
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        status.textContent = `Listening (${audioContext.sampleRate} Hz microphone -> 16 kHz PCM)`;
+      } catch (error) {
+        status.textContent = `Microphone error: ${error.message}`;
+        stopMicrophone();
+        socket.close();
+      }
+    };
+    socket.onmessage = ({ data }) => {
+      const event = JSON.parse(data);
+      events.textContent += `${event.type}\n`;
+      events.scrollTop = events.scrollHeight;
+      if (event.type === 'session_started') { status.textContent = 'Session connected'; backendState.textContent = 'Connected'; }
+      if (event.type === 'model_loading') { status.textContent = 'Loading local Parakeet model...'; modelState.textContent = 'Loading'; startLoadingTimer(); }
+      if (event.type === 'model_ready') { stopLoadingTimer(); modelState.textContent = 'Ready'; status.textContent = useMicrophone ? 'Model ready; starting microphone...' : 'Model ready'; }
+      if (event.type === 'audio_received') { audioState.textContent = event.text; inferenceState.textContent = 'Receiving audio'; }
+      if (event.type === 'partial_transcript' || event.type === 'final_transcript') transcript.textContent = event.text || 'Listening...';
+      if (event.type === 'partial_transcript') { inferenceState.textContent = `Partial at ${new Date().toLocaleTimeString()}`; }
+      if (event.type === 'final_transcript') { inferenceState.textContent = 'Final transcript ready'; }
+      if (event.type === 'error') { stopLoadingTimer(); modelState.textContent = 'Failed'; status.textContent = `ASR error: ${event.error}`; }
+      if (event.type === 'session_finished') { status.textContent = 'Finished'; stopMicrophone(); demo.disabled = true; finish.disabled = true; }
+    };
+    socket.onerror = () => { status.textContent = 'WebSocket connection error'; };
+    socket.onclose = () => { stopMicrophone(); start.disabled = false; demo.disabled = true; finish.disabled = true; };
+  }
+  start.onclick = () => connect(true);
+  demo.onclick = () => socket.send(JSON.stringify({ type: 'mock_text', text: 'Patient takes ram a pro five milligrams once daily' }));
+  finish.onclick = () => { stopMicrophone(); if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'finalize' })); };
+</script>
+</body>
+</html>
