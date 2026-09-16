@@ -42,6 +42,14 @@ async def run_backend(operation, *args):
     return await asyncio.to_thread(lambda: asyncio.run(operation(*args)))
 
 
+async def send_json(websocket: WebSocket, payload: dict) -> bool:
+    try:
+        await websocket.send_json(payload)
+        return True
+    except (WebSocketDisconnect, RuntimeError):
+        return False
+
+
 @app.websocket("/v1/transcribe/stream")
 async def transcribe(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -51,28 +59,45 @@ async def transcribe(websocket: WebSocket) -> None:
     speech_started = False
     audio_bytes = 0
     audio_chunks = 0
-    await websocket.send_json(TranscriptEvent(type="session_started", session_id=session_id).to_dict())
-    await websocket.send_json(TranscriptEvent(type="model_loading", session_id=session_id).to_dict())
+
+    # Send initial events with disconnect handling
+    if not await send_json(websocket, TranscriptEvent(type="session_started", session_id=session_id).to_dict()):
+        return
+
+    if not await send_json(websocket, TranscriptEvent(type="model_loading", session_id=session_id).to_dict()):
+        return
+
+    # Load model with disconnect handling
     try:
         await run_backend(backend.start_session)
-    except Exception as exc:
-        await websocket.send_json(TranscriptEvent(type="error", error=str(exc), session_id=session_id).to_dict())
-        await websocket.close()
+    except WebSocketDisconnect:
         return
-    await websocket.send_json(TranscriptEvent(type="model_ready", session_id=session_id).to_dict())
+    except Exception as exc:
+        await send_json(websocket, TranscriptEvent(type="error", error=str(exc), session_id=session_id).to_dict())
+        return
+
+    # Send model ready
+    if not await send_json(websocket, TranscriptEvent(type="model_ready", session_id=session_id).to_dict()):
+        return
+
     try:
         while True:
-            message = await websocket.receive()
+            try:
+                message = await websocket.receive()
+            except (WebSocketDisconnect, RuntimeError):
+                return
             if message.get("bytes") is not None:
                 chunk = message["bytes"]
                 audio_bytes += len(chunk)
                 audio_chunks += 1
                 if chunk and not speech_started:
                     speech_started = True
-                    await websocket.send_json(TranscriptEvent(type="speech_started", session_id=session_id).to_dict())
+                    if not await send_json(websocket, TranscriptEvent(type="speech_started", session_id=session_id).to_dict()):
+                        return
                 text = await run_backend(backend.push_audio, chunk)
                 if audio_chunks == 1 or audio_chunks % 10 == 0:
-                    await websocket.send_json(TranscriptEvent(type="audio_received", text=f"{audio_bytes} bytes in {audio_chunks} chunks", session_id=session_id).to_dict())
+                    if not await send_json(websocket, TranscriptEvent(type="audio_received", text=f"{audio_bytes} bytes in {audio_chunks} chunks", session_id=session_id).to_dict()):
+                        return
             else:
                 payload = message.get("text")
                 if payload is None:
@@ -82,23 +107,29 @@ async def transcribe(websocket: WebSocket) -> None:
                 if command.get("type") == "mock_text":
                     speech_started = True
                     text = await run_backend(backend.push_demo_text, command.get("text", ""))
-                    await websocket.send_json(TranscriptEvent(type="speech_started", session_id=session_id).to_dict())
+                    if not await send_json(websocket, TranscriptEvent(type="speech_started", session_id=session_id).to_dict()):
+                        return
                 elif command.get("type") == "finalize":
                     text = await run_backend(backend.finalize)
                     resolved, terms = resolver.apply(text)
                     if speech_started:
-                        await websocket.send_json(TranscriptEvent(type="speech_ended", session_id=session_id).to_dict())
-                    await websocket.send_json(TranscriptEvent(type="final_transcript", text=resolved, confidence=0.9, terms=terms, session_id=session_id).to_dict())
-                    await websocket.send_json(TranscriptEvent(type="session_finished", session_id=session_id).to_dict())
+                        if not await send_json(websocket, TranscriptEvent(type="speech_ended", session_id=session_id).to_dict()):
+                            return
+                    if not await send_json(websocket, TranscriptEvent(type="final_transcript", text=resolved, confidence=0.9, terms=terms, session_id=session_id).to_dict()):
+                        return
+                    if not await send_json(websocket, TranscriptEvent(type="session_finished", session_id=session_id).to_dict()):
+                        return
                     break
                 else:
                     continue
             if text:
                 resolved, terms = resolver.apply(text)
-                await websocket.send_json(TranscriptEvent(type="partial_transcript", text=resolved, confidence=0.9, terms=terms, session_id=session_id, start_ms=0, end_ms=int((time.monotonic() - started) * 1000)).to_dict())
+                if not await send_json(websocket, TranscriptEvent(type="partial_transcript", text=resolved, confidence=0.9, terms=terms, session_id=session_id, start_ms=0, end_ms=int((time.monotonic() - started) * 1000)).to_dict()):
+                    return
                 if terms:
-                    await websocket.send_json(TranscriptEvent(type="terminology_update", terms=terms, session_id=session_id).to_dict())
+                    if not await send_json(websocket, TranscriptEvent(type="terminology_update", terms=terms, session_id=session_id).to_dict()):
+                        return
     except WebSocketDisconnect:
         return
     except Exception as exc:
-        await websocket.send_json(TranscriptEvent(type="error", error=str(exc), session_id=session_id).to_dict())
+        await send_json(websocket, TranscriptEvent(type="error", error=str(exc), session_id=session_id).to_dict())
