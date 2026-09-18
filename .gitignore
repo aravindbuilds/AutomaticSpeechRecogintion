@@ -1,6 +1,9 @@
 .venv/
 __pycache__/
 .pytest_cache/
+server.err.log
+server.out.log
+*.nemo
 models/**/*.nemo
 models/**/*.ckpt
 models/**/*.pt

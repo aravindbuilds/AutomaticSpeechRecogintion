@@ -3,157 +3,593 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Offline Clinical ASR</title>
+  <title>Clinical ASR — Ambient Voice Orb</title>
   <style>
-    :root { color-scheme: light; font-family: system-ui, sans-serif; --ink: #17324d; --accent: #d45b38; --wash: #f4efe7; }
-    body { margin: 0; color: var(--ink); background: radial-gradient(circle at top right, #e5efe9, var(--wash) 48%, #efe0d5); min-height: 100vh; }
-    main { max-width: 860px; margin: auto; padding: 8vh 6vw; }
-    h1 { font-size: clamp(2rem, 6vw, 4.8rem); line-height: .95; max-width: 8ch; margin: 0 0 1rem; letter-spacing: 0; }
-    p { max-width: 58ch; line-height: 1.5; }
-    .toolbar { display: flex; gap: .75rem; flex-wrap: wrap; margin: 2rem 0; }
-    button { border: 0; border-radius: 6px; padding: .8rem 1rem; background: var(--ink); color: white; cursor: pointer; font: inherit; }
-    button.secondary { background: var(--accent); }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    #status { font-weight: 700; min-height: 1.5em; }
-    #activity { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .5rem; margin: 1rem 0 2rem; }
-    .metric { padding: .75rem; background: rgba(255,255,255,.55); border-top: 3px solid var(--accent); }
-    .metric small { display: block; opacity: .7; }
-    .metric strong { display: block; margin-top: .25rem; }
-    #transcript { min-height: 10rem; padding: 1.25rem; background: rgba(255,255,255,.72); border-left: 5px solid var(--accent); font-size: 1.35rem; line-height: 1.5; }
-    #events { font: .8rem ui-monospace, monospace; white-space: pre-wrap; max-height: 12rem; overflow: auto; opacity: .75; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #000; --surface: rgba(255,255,255,0.03); --surface-hover: rgba(255,255,255,0.06);
+      --border: rgba(255,255,255,0.08); --text: rgba(255,255,255,0.85); --text-muted: rgba(255,255,255,0.4);
+      --text-dim: rgba(255,255,255,0.25); --accent: #5ac8fa; --accent-glow: rgba(90,200,250,0.3);
+      --warning: #ffd60a; --error: #ff453a; --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); font-family: var(--font); color: var(--text); }
+    body { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+    #topbar { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--surface); backdrop-filter: blur(10px); z-index: 10; }
+    #topbar .brand { font-size: 14px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-muted); text-transform: uppercase; }
+    #topbar .brand span { color: var(--accent); }
+    #conn { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+    #conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.4s, box-shadow 0.4s; }
+    #conn.ready .dot { background: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
+    #conn.speaking .dot { background: var(--accent); box-shadow: 0 0 14px var(--accent-glow); }
+    #conn.error .dot { background: var(--error); box-shadow: 0 0 10px rgba(255,69,58,0.4); }
+    #conn.loading .dot { background: var(--warning); box-shadow: 0 0 10px rgba(255,214,10,0.4); animation: loading-pulse 1.2s ease-in-out infinite; }
+    @keyframes loading-pulse { 0%,100% { opacity: 0.5; transform: scale(1); } 50% { opacity: 1; transform: scale(1.3); } }
+    #main { display: grid; grid-template-columns: 1fr 400px; overflow: hidden; }
+    #orb-area { display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; overflow: hidden; }
+    #orb-container { position: relative; width: 340px; height: 340px; flex-shrink: 0; }
+    .orb-glow { position: absolute; top: 50%; left: 50%; width: 420px; height: 420px; transform: translate(-50%,-50%); border-radius: 50%; background: radial-gradient(circle, rgba(80,130,255,0.06) 0%, transparent 70%); filter: blur(50px); pointer-events: none; }
+    #orb { position: absolute; top: 50%; left: 50%; width: 280px; height: 280px; transform: translate(-50%,-50%); border-radius: 50%; will-change: transform, filter; pointer-events: none; background: radial-gradient(ellipse 65% 75% at 38% 30%, rgba(140,180,255,0.95) 0%, rgba(100,140,255,0.75) 15%, rgba(60,100,220,0.45) 35%, rgba(30,50,140,0.25) 55%, rgba(10,20,60,0.12) 75%, transparent 100%), radial-gradient(ellipse 80% 60% at 60% 70%, rgba(200,220,255,0.6) 0%, rgba(160,190,255,0.35) 20%, rgba(80,120,220,0.15) 45%, transparent 70%), radial-gradient(ellipse 50% 50% at 45% 45%, rgba(180,210,255,0.5) 0%, transparent 60%); box-shadow: inset 0 0 80px rgba(255,255,255,0.06), inset 0 0 30px rgba(140,180,255,0.1); filter: blur(0.5px); }
+    #orb.loading { animation: orb-loading 1.5s ease-in-out infinite; background: radial-gradient(ellipse 65% 75% at 38% 30%, rgba(255,230,100,0.95) 0%, rgba(255,200,50,0.75) 15%, rgba(200,150,30,0.45) 35%, rgba(140,100,10,0.25) 55%, rgba(60,40,0,0.12) 75%, transparent 100%), radial-gradient(ellipse 80% 60% at 60% 70%, rgba(255,240,150,0.6) 0%, rgba(255,220,100,0.35) 20%, rgba(200,160,50,0.15) 45%, transparent 70%), radial-gradient(ellipse 50% 50% at 45% 45%, rgba(255,235,130,0.5) 0%, transparent 60%); box-shadow: inset 0 0 80px rgba(255,255,200,0.06), inset 0 0 30px rgba(255,200,50,0.1); }
+    @keyframes orb-loading { 0%,100% { filter: blur(0.5px) brightness(0.7); } 50% { filter: blur(1.5px) brightness(1.1); } }
+    #orb.recording { box-shadow: inset 0 0 80px rgba(255,255,255,0.1), inset 0 0 30px rgba(140,180,255,0.2), 0 0 40px rgba(90,200,250,0.3); }
+    #orb-clouds { position: absolute; top: 50%; left: 50%; width: 280px; height: 280px; transform: translate(-50%,-50%); border-radius: 50%; overflow: hidden; pointer-events: none; mix-blend-mode: screen; will-change: transform, opacity; }
+    #orb-clouds::before, #orb-clouds::after { content: ''; position: absolute; border-radius: 50%; will-change: transform, opacity; }
+    #orb-clouds::before { top: 10%; left: -20%; width: 90%; height: 70%; background: radial-gradient(ellipse 60% 80% at 50% 50%, rgba(200,220,255,0.35) 0%, rgba(150,180,255,0.15) 40%, transparent 70%); filter: blur(20px); }
+    #orb-clouds::after { bottom: 5%; right: -15%; width: 80%; height: 60%; background: radial-gradient(ellipse 70% 60% at 50% 50%, rgba(180,210,255,0.3) 0%, rgba(120,160,255,0.1) 50%, transparent 80%); filter: blur(25px); }
+    #orb-clouds.loading::before { background: radial-gradient(ellipse 60% 80% at 50% 50%, rgba(255,240,180,0.35) 0%, rgba(255,220,100,0.15) 40%, transparent 70%); }
+    #orb-clouds.loading::after { background: radial-gradient(ellipse 70% 60% at 50% 50%, rgba(255,245,160,0.3) 0%, rgba(255,220,80,0.1) 50%, transparent 80%); }
+    #orb-noise { position: absolute; top: 50%; left: 50%; width: 280px; height: 280px; transform: translate(-50%,-50%); border-radius: 50%; overflow: hidden; pointer-events: none; opacity: 0.035; mix-blend-mode: overlay; }
+    #orb-noise::before { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); background-size: 200px 200px; }
+    #orb-highlight { position: absolute; top: 22%; left: 28%; width: 60px; height: 40px; border-radius: 50%; pointer-events: none; transform: rotate(-15deg); background: radial-gradient(ellipse at 50% 50%, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.05) 40%, transparent 70%); filter: blur(6px); }
+    #status-text { position: absolute; bottom: -60px; left: 50%; transform: translateX(-50%); color: var(--text-muted); font-size: 13px; letter-spacing: 1.2px; text-transform: uppercase; text-align: center; pointer-events: none; user-select: none; transition: color 0.6s; white-space: nowrap; }
+    #status-text.speaking { color: rgba(255,255,255,0.55); }
+    #status-text.loading { color: var(--warning); }
+    #panel { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); background: var(--surface); backdrop-filter: blur(10px); }
+    #panel-header { padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); }
+    #transcript { flex: 1; min-height: 0; overflow-y: auto; padding: 20px; font-size: 15px; line-height: 1.7; color: var(--text); scroll-behavior: smooth; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #transcript:empty::before { content: 'Your transcribed speech will appear here...'; color: var(--text-dim); font-style: italic; }
+    #transcript .final-text { display: inline; color: rgba(255,255,255,0.92); opacity: 1; }
+    #transcript .partial-text { display: inline; color: rgba(255,255,255,0.35); border-right: 2px solid var(--accent); animation: cursor-blink 0.8s step-end infinite; padding-right: 2px; }
+    @keyframes cursor-blink { 50% { border-color: transparent; } }
+    #transcript::-webkit-scrollbar { width: 4px; }
+    #transcript::-webkit-scrollbar-track { background: transparent; }
+    #transcript::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    #controls { padding: 20px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
+    .btn { flex: 1; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); font-family: var(--font); font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.25s ease; letter-spacing: 0.3px; white-space: nowrap; }
+    .btn:hover:not(:disabled) { background: var(--surface-hover); border-color: rgba(255,255,255,0.15); }
+    .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn.primary { background: rgba(90,200,250,0.15); border-color: rgba(90,200,250,0.4); color: var(--accent); }
+    .btn.primary:hover:not(:disabled) { background: rgba(90,200,250,0.25); border-color: rgba(90,200,250,0.6); }
+    .btn-talk { width: 100%; padding: 16px 24px; border: 2px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--text); font-family: var(--font); font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; letter-spacing: 0.5px; text-transform: uppercase; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+    .btn-talk:hover:not(:disabled) { background: var(--surface-hover); border-color: rgba(255,255,255,0.2); }
+    .btn-talk:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn-talk.holding { background: rgba(90,200,250,0.2); border-color: var(--accent); color: var(--accent); box-shadow: 0 0 20px rgba(90,200,250,0.3), inset 0 0 20px rgba(90,200,250,0.1); transform: scale(0.98); }
+    .btn-talk .talk-icon { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: currentColor; margin-right: 8px; vertical-align: middle; transition: all 0.2s ease; }
+    .btn-talk.holding .talk-icon { border-radius: 2px; animation: talk-pulse 0.8s ease-in-out infinite; }
+    @keyframes talk-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.3); } }
+    #metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .metric { padding: 10px 12px; background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 10px; }
+    .metric small { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-dim); margin-bottom: 4px; }
+    .metric strong { display: block; font-size: 13px; font-weight: 500; color: var(--text); font-family: var(--mono); }
+    #statusbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 24px; border-top: 1px solid var(--border); background: var(--surface); font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
+    #statusbar .event-log { display: flex; gap: 16px; }
+    #statusbar .event-log span { display: flex; align-items: center; gap: 4px; }
+    #statusbar .event-log .label { color: var(--text-dim); }
+    #statusbar .event-log .value { color: var(--text-muted); }
+    @media (max-width: 900px) {
+      #main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+      #panel { border-left: none; border-top: 1px solid var(--border); max-height: 40vh; }
+      #orb-area { padding: 20px; }
+      #orb-container { width: 260px; height: 260px; }
+      #orb { width: 200px; height: 200px; }
+      .orb-glow { width: 300px; height: 300px; }
+      #metrics { grid-template-columns: repeat(2, 1fr); }
+    }
   </style>
 </head>
 <body>
-<main>
-  <p id="status">Disconnected</p>
-  <h1>Clinical speech, kept local.</h1>
-  <p>Allow microphone access to stream 16 kHz mono PCM locally to the ASR service. Audio is not uploaded anywhere.</p>
-  <div class="toolbar">
-    <button id="start">Start microphone</button>
-    <button id="demo" class="secondary" disabled>Use demo phrase</button>
-    <button id="finish" disabled>Finalize</button>
+  <header id="topbar">
+    <div class="brand">Clinical <span>ASR</span></div>
+    <div id="conn"><div class="dot"></div><span id="conn-label">Disconnected</span></div>
+  </header>
+  <div id="main">
+    <section id="orb-area">
+      <div id="orb-container">
+        <div class="orb-glow" id="orb-glow"></div>
+        <div id="orb-clouds"></div>
+        <div id="orb-noise"></div>
+        <div id="orb-highlight"></div>
+        <div id="orb"></div>
+      </div>
+      <div id="status-text">Click to begin</div>
+    </section>
+    <aside id="panel">
+      <div id="panel-header">Transcript</div>
+      <div id="transcript" aria-live="polite"></div>
+      <div id="controls">
+        <div id="metrics">
+          <div class="metric"><small>Model</small><strong id="modelState">—</strong></div>
+          <div class="metric"><small>Audio</small><strong id="audioState">0 B</strong></div>
+          <div class="metric"><small>Inference</small><strong id="inferenceState">Idle</strong></div>
+          <div class="metric"><small>Backend</small><strong id="backendState">—</strong></div>
+        </div>
+        <button class="btn primary" id="loadModel">Load Model</button>
+        <button class="btn-talk" id="talkBtn" disabled>
+          <span class="talk-icon"></span>
+          <span id="talkLabel">Hold to Transcribe</span>
+        </button>
+      </div>
+    </aside>
   </div>
-  <section id="activity" aria-live="polite">
-    <div class="metric"><small>Model</small><strong id="modelState">Not connected</strong></div>
-    <div class="metric"><small>Audio</small><strong id="audioState">0 bytes</strong></div>
-    <div class="metric"><small>Inference</small><strong id="inferenceState">Idle</strong></div>
-    <div class="metric"><small>Backend</small><strong id="backendState">Unknown</strong></div>
-  </section>
-  <section id="transcript" aria-live="polite">Waiting for a session.</section>
-  <pre id="events"></pre>
-</main>
+  <footer id="statusbar">
+    <div class="event-log">
+      <span><span class="label">Session</span> <span class="value" id="sessionId">—</span></span>
+      <span><span class="label">Duration</span> <span class="value" id="duration">00:00</span></span>
+    </div>
+    <div class="event-log">
+      <span><span class="label">Events</span> <span class="value" id="eventCount">0</span></span>
+    </div>
+  </footer>
+
 <script>
-  let socket;
-  let microphone;
-  let audioContext;
-  let processor;
-  let source;
-  let loadingTimer;
-  let loadingStarted;
-  const status = document.querySelector('#status');
-  const transcript = document.querySelector('#transcript');
-  const events = document.querySelector('#events');
-  const start = document.querySelector('#start');
-  const demo = document.querySelector('#demo');
-  const finish = document.querySelector('#finish');
-  const modelState = document.querySelector('#modelState');
-  const audioState = document.querySelector('#audioState');
-  const inferenceState = document.querySelector('#inferenceState');
-  const backendState = document.querySelector('#backendState');
-  function downsample(buffer, inputRate, outputRate) {
-    if (inputRate === outputRate) return buffer;
-    const ratio = inputRate / outputRate;
-    const outputLength = Math.round(buffer.length / ratio);
-    const output = new Float32Array(outputLength);
-    for (let i = 0; i < outputLength; i++) {
-      const position = i * ratio;
-      const left = Math.floor(position);
-      const right = Math.min(left + 1, buffer.length - 1);
-      const weight = position - left;
-      output[i] = buffer[left] * (1 - weight) + buffer[right] * weight;
+(() => {
+  'use strict';
+
+  const orb = document.getElementById('orb');
+  const orbGlow = document.getElementById('orb-glow');
+  const orbClouds = document.getElementById('orb-clouds');
+  const orbHighlight = document.getElementById('orb-highlight');
+  const conn = document.getElementById('conn');
+  const connLabel = document.getElementById('conn-label');
+  const statusText = document.getElementById('status-text');
+  const transcript = document.getElementById('transcript');
+  const loadModelBtn = document.getElementById('loadModel');
+  const talkBtn = document.getElementById('talkBtn');
+  const talkLabel = document.getElementById('talkLabel');
+  const modelState = document.getElementById('modelState');
+  const audioState = document.getElementById('audioState');
+  const inferenceState = document.getElementById('inferenceState');
+  const backendState = document.getElementById('backendState');
+  const sessionIdEl = document.getElementById('sessionId');
+  const durationEl = document.getElementById('duration');
+  const eventCountEl = document.getElementById('eventCount');
+
+  const state = { energy: 0, idlePhase: 0, cloudDrift: 0, noisePhase: 0, speaking: false };
+  const LOW_PASS_ATTACK = 0.15;
+  const LOW_PASS_DECAY = 0.08;
+  const IDLE_MIN_SCALE = 0.98;
+  const IDLE_MAX_SCALE = 1.03;
+  const SPEAK_SCALE_BOOST = 0.14;
+  const SPEAK_GLOW_BOOST = 0.35;
+
+  let audioContext = null, analyser = null, micStream = null, freqData = null;
+  let ws = null, modelReady = false, sessionStartTime = 0, eventCount = 0;
+  let durationTimer = null, loadingTimer = null, loadingStarted = 0;
+  let isRecording = false;
+  let isFinalizing = false;
+
+  // ─── Transcript state ────────────────────────────────────────────
+  // Server protocol:
+  //   committed_transcript: text = full cumulative (render as white)
+  //   partial_transcript:   text = complete latest audio-window hypothesis
+  //   final_transcript:     text = full cumulative (render all as white)
+  // Completed sessions are retained; partial text only represents the
+  // current sliding audio window and is replaced as recognition advances.
+  let transcriptHistory = '';
+  let committedText = '';
+  let partialText = '';
+  let historyEl = null;
+  let committedEl = null;
+  let historySeparatorEl = null;
+  let activeSeparatorEl = null;
+  let partialEl = null;
+
+  function mergeTranscript(base, addition) {
+    base = (base || '').trim();
+    addition = (addition || '').trim();
+    if (!base) return addition;
+    if (!addition) return base;
+    if (addition.startsWith(base)) return addition;
+
+    const baseWords = base.split(/\s+/);
+    const additionWords = addition.split(/\s+/);
+    let overlap = 0;
+    for (let size = 1; size <= Math.min(baseWords.length, additionWords.length); size++) {
+      if (baseWords.slice(-size).join(' ') === additionWords.slice(0, size).join(' ')) overlap = size;
     }
-    return output;
+    const suffix = additionWords.slice(overlap).join(' ');
+    return suffix ? `${base} ${suffix}` : base;
   }
 
-  function floatToPcm16(samples) {
-    const pcm = new Int16Array(samples.length);
-    for (let i = 0; i < samples.length; i++) {
-      const value = Math.max(-1, Math.min(1, samples[i]));
-      pcm[i] = value < 0 ? value * 32768 : value * 32767;
+  function extractActiveWindow(committed, hypothesis) {
+    committed = (committed || '').trim();
+    hypothesis = (hypothesis || '').trim();
+    if (!committed || !hypothesis) return hypothesis;
+    if (hypothesis.startsWith(committed)) return hypothesis.slice(committed.length).trim();
+
+    const normalize = word => word.toLowerCase().replace(/^[.,!?;:]+|[.,!?;:]+$/g, '');
+    const committedWords = committed.split(/\s+/).map(normalize);
+    const hypothesisWords = hypothesis.split(/\s+/);
+    const normalizedHypothesis = hypothesisWords.map(normalize);
+
+    // The active rolling window can restart from an older phrase already
+    // present in the committed transcript. Remove that repeated context
+    // before rendering the grey tail.
+    for (let size = Math.min(committedWords.length, normalizedHypothesis.length); size >= 2; size--) {
+      const prefix = normalizedHypothesis.slice(0, size).join(' ');
+      for (let start = 0; start <= committedWords.length - size; start++) {
+        if (committedWords.slice(start, start + size).join(' ') === prefix) {
+          return hypothesisWords.slice(size).join(' ');
+        }
+      }
     }
-    return pcm.buffer;
+
+    // Only strip overlap at the active-window boundary. Searching anywhere
+    // in the hypothesis can mistake a repeated phrase for the boundary and
+    // omit valid grey words.
+    for (let size = Math.min(committedWords.length, normalizedHypothesis.length); size >= 2; size--) {
+      const needle = committedWords.slice(-size).join(' ');
+      if (normalizedHypothesis.slice(0, size).join(' ') === needle) {
+        return hypothesisWords.slice(size).join(' ');
+      }
+    }
+    return hypothesis;
   }
 
-  function stopMicrophone() {
-    if (processor) processor.disconnect();
-    if (source) source.disconnect();
-    if (microphone) microphone.getTracks().forEach(track => track.stop());
-    processor = null;
-    source = null;
-    microphone = null;
+  function renderTranscript() {
+    const wasNearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 48;
+    const children = [];
+
+    if (transcriptHistory) {
+      if (!historyEl) {
+        historyEl = document.createElement('span');
+        historyEl.className = 'final-text';
+      }
+      historyEl.textContent = transcriptHistory;
+      children.push(historyEl);
+    }
+    if (transcriptHistory && (committedText || partialText)) {
+      if (!historySeparatorEl) historySeparatorEl = document.createTextNode('\n\n');
+      children.push(historySeparatorEl);
+    }
+    if (committedText) {
+      if (!committedEl) {
+        committedEl = document.createElement('span');
+        committedEl.className = 'final-text';
+      }
+      committedEl.textContent = committedText;
+      children.push(committedEl);
+    }
+    if (committedText && partialText) {
+      if (!activeSeparatorEl) activeSeparatorEl = document.createTextNode('\u00a0');
+      children.push(activeSeparatorEl);
+    }
+    if (partialText && partialEl) {
+      children.push(partialEl);
+    }
+
+    // Reorder only when the logical structure changes. Existing nodes are
+    // updated in place, avoiding a visible flash whenever words turn white.
+    children.forEach((child, index) => {
+      if (transcript.childNodes[index] !== child) {
+        transcript.insertBefore(child, transcript.childNodes[index] || null);
+      }
+    });
+    while (transcript.childNodes.length > children.length) {
+      transcript.removeChild(transcript.lastChild);
+    }
+    if (wasNearBottom) transcript.scrollTop = transcript.scrollHeight;
   }
 
-  function stopLoadingTimer() {
+  // Handle committed_transcript event — make text white
+  function onCommitted(text) {
+    // The server sends the complete committed prefix. Replace the old
+    // prefix; merging it here would append the same sliding-window text.
+    if (text) committedText = text;
+    partialText = '';
+    renderTranscript();
+  }
+
+  // Handle partial_transcript event — replace the grey current-window text.
+  function onPartial(text, committed, activeOnly = false) {
+    if (typeof committed === 'string' && committed) committedText = committed;
+    partialText = text || '';
+    if (partialText) {
+      if (!partialEl) {
+        partialEl = document.createElement('span');
+        partialEl.className = 'partial-text';
+      }
+      partialEl.textContent = activeOnly
+        ? partialText
+        : extractActiveWindow(committedText, partialText);
+    } else {
+      partialEl = null;
+    }
+    renderTranscript();
+  }
+
+  // Handle final_transcript event — commit everything to white
+  function onFinal(text) {
+    const finalText = (text || mergeTranscript(committedText, partialText)).trim();
+    if (finalText) transcriptHistory = transcriptHistory ? `${transcriptHistory}\n\n${finalText}` : finalText;
+    committedText = '';
+    partialText = '';
+    partialEl = null;
+    renderTranscript();
+  }
+
+  // ─── Audio analysis ──────────────────────────────────────────────
+  function getRMS(array) { let sum = 0; for (let i = 0; i < array.length; i++) sum += array[i] * array[i]; return Math.sqrt(sum / array.length); }
+  function normalizeAmplitude(rms) { return Math.max(0, Math.min(1, (rms - 0.01) / (0.17))); }
+
+  // ─── Loading indicator ───────────────────────────────────────────
+  function showLoading() {
+    orb.classList.add('loading');
+    orbClouds.classList.add('loading');
+    orbHighlight.style.opacity = '0';
+    conn.className = 'loading';
+    connLabel.textContent = 'Loading';
+    statusText.textContent = 'Loading model...';
+    statusText.className = 'loading';
+    loadingStarted = performance.now();
+    loadingTimer = setInterval(() => {
+      const elapsed = Math.round((performance.now() - loadingStarted) / 1000);
+      statusText.textContent = `Loading model... (${elapsed}s)`;
+    }, 250);
+  }
+  function hideLoading() {
+    orb.classList.remove('loading');
+    orbClouds.classList.remove('loading');
+    orbHighlight.style.opacity = '';
     if (loadingTimer) clearInterval(loadingTimer);
     loadingTimer = null;
   }
 
-  function startLoadingTimer() {
-    loadingStarted = performance.now();
-    stopLoadingTimer();
-    loadingTimer = setInterval(() => {
-      modelState.textContent = `Loading (${Math.round((performance.now() - loadingStarted) / 1000)}s)`;
-    }, 250);
-  }
+  // ─── WebSocket ───────────────────────────────────────────────────
+  function connectWebSocket() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/v1/transcribe/stream`);
+    ws.binaryType = 'arraybuffer';
 
-  async function connect(useMicrophone) {
-    socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/v1/transcribe/stream`);
-    socket.binaryType = 'arraybuffer';
-    socket.onopen = async () => {
-      status.textContent = useMicrophone ? 'Requesting microphone...' : 'Connected';
-      demo.disabled = false;
-      finish.disabled = false;
-      start.disabled = true;
-      if (!useMicrophone) return;
-      try {
-        microphone = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-        audioContext = new AudioContext();
-        source = audioContext.createMediaStreamSource(microphone);
-        processor = audioContext.createScriptProcessor(4096, 1, 1);
-        processor.onaudioprocess = event => {
-          if (socket.readyState !== WebSocket.OPEN) return;
-          const mono = event.inputBuffer.getChannelData(0);
-          socket.send(floatToPcm16(downsample(mono, audioContext.sampleRate, 16000)));
-        };
-        source.connect(processor);
-        processor.connect(audioContext.destination);
-        status.textContent = `Listening (${audioContext.sampleRate} Hz microphone -> 16 kHz PCM)`;
-      } catch (error) {
-        status.textContent = `Microphone error: ${error.message}`;
-        stopMicrophone();
-        socket.close();
+    ws.onopen = () => { conn.className = 'ready'; connLabel.textContent = 'Connected'; modelState.textContent = 'Loading'; showLoading(); };
+
+    ws.onmessage = ({ data }) => {
+      const event = JSON.parse(data);
+      eventCount++;
+      eventCountEl.textContent = eventCount;
+
+      switch (event.type) {
+        case 'session_started':
+          sessionIdEl.textContent = event.session_id?.slice(0, 8) || '—';
+          sessionStartTime = performance.now();
+          startDurationTimer();
+          backendState.textContent = 'Connected';
+          break;
+        case 'model_loading': showLoading(); break;
+        case 'model_ready':
+          hideLoading(); modelReady = true; isFinalizing = false; modelState.textContent = 'Ready';
+          conn.className = 'ready'; connLabel.textContent = 'Ready';
+          statusText.textContent = 'Ready — hold to transcribe'; statusText.className = '';
+          talkBtn.disabled = false; loadModelBtn.disabled = true;
+          break;
+        case 'committed_transcript':
+          // Buffer was trimmed — make this text white
+          onCommitted(event.text);
+          break;
+        case 'partial_transcript':
+          onPartial(event.text, event.committed, event.active_only === true);
+          inferenceState.textContent = 'Partial';
+          break;
+        case 'final_transcript':
+          onFinal(event.text);
+          inferenceState.textContent = 'Final';
+          break;
+        case 'speech_started':
+          state.speaking = true; conn.className = 'speaking'; connLabel.textContent = 'Listening';
+          break;
+        case 'speech_ended':
+          state.speaking = false; conn.className = 'ready'; connLabel.textContent = 'Ready';
+          break;
+        case 'session_finished':
+          modelState.textContent = 'Ready';
+          conn.className = 'ready'; connLabel.textContent = 'Ready';
+          statusText.textContent = 'Ready — hold to transcribe'; statusText.className = '';
+          talkBtn.disabled = !modelReady; loadModelBtn.disabled = true;
+          isFinalizing = false;
+          if (!isRecording) {
+            talkBtn.classList.remove('holding'); talkLabel.textContent = 'Hold to Transcribe';
+          }
+          break;
+        case 'audio_received':
+          audioState.textContent = event.text?.split(' ')[0] + ' B';
+          break;
+        case 'warning': console.warn('Server warning:', event.text); break;
+        case 'error':
+          conn.className = 'error'; connLabel.textContent = 'Error';
+          statusText.textContent = event.error || 'An error occurred'; statusText.className = 'error';
+          console.error('Server error:', event.error);
+          break;
       }
     };
-    socket.onmessage = ({ data }) => {
-      const event = JSON.parse(data);
-      events.textContent += `${event.type}\n`;
-      events.scrollTop = events.scrollHeight;
-      if (event.type === 'session_started') { status.textContent = 'Session connected'; backendState.textContent = 'Connected'; }
-      if (event.type === 'model_loading') { status.textContent = 'Loading local Parakeet model...'; modelState.textContent = 'Loading'; startLoadingTimer(); }
-      if (event.type === 'model_ready') { stopLoadingTimer(); modelState.textContent = 'Ready'; status.textContent = useMicrophone ? 'Model ready; starting microphone...' : 'Model ready'; }
-      if (event.type === 'audio_received') { audioState.textContent = event.text; inferenceState.textContent = 'Receiving audio'; }
-      if (event.type === 'partial_transcript' || event.type === 'final_transcript') transcript.textContent = event.text || 'Listening...';
-      if (event.type === 'partial_transcript') { inferenceState.textContent = `Partial at ${new Date().toLocaleTimeString()}`; }
-      if (event.type === 'final_transcript') { inferenceState.textContent = 'Final transcript ready'; }
-      if (event.type === 'error') { stopLoadingTimer(); modelState.textContent = 'Failed'; status.textContent = `ASR error: ${event.error}`; }
-      if (event.type === 'session_finished') { status.textContent = 'Finished'; stopMicrophone(); demo.disabled = true; finish.disabled = true; }
+
+    ws.onerror = () => { conn.className = 'error'; connLabel.textContent = 'Error'; statusText.textContent = 'Connection error'; };
+    ws.onclose = () => {
+      conn.className = ''; connLabel.textContent = 'Disconnected'; statusText.textContent = 'Disconnected';
+      modelReady = false; isRecording = false; isFinalizing = false; recordingGeneration++; stopAudio(); stopDurationTimer(); hideLoading();
+      setTimeout(() => { if (!ws || ws.readyState === WebSocket.CLOSED) connectWebSocket(); }, 2000);
     };
-    socket.onerror = () => { status.textContent = 'WebSocket connection error'; };
-    socket.onclose = () => { stopMicrophone(); start.disabled = false; demo.disabled = true; finish.disabled = true; };
   }
-  start.onclick = () => connect(true);
-  demo.onclick = () => socket.send(JSON.stringify({ type: 'mock_text', text: 'Patient takes ram a pro five milligrams once daily' }));
-  finish.onclick = () => { stopMicrophone(); if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'finalize' })); };
+
+  function startDurationTimer() {
+    stopDurationTimer();
+    durationTimer = setInterval(() => {
+      const elapsed = Math.floor((performance.now() - sessionStartTime) / 1000);
+      durationEl.textContent = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`;
+    }, 1000);
+  }
+  function stopDurationTimer() { if (durationTimer) clearInterval(durationTimer); durationTimer = null; }
+
+  // ─── Audio pipeline ──────────────────────────────────────────────
+  async function startAudio(generation = recordingGeneration) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      // A quick pointerup can happen while getUserMedia is still pending.
+      // Do not attach a stream that belongs to an already-ended recording.
+      if (generation !== recordingGeneration || !isRecording) {
+        stream.getTracks().forEach(t => t.stop());
+        return false;
+      }
+      micStream = stream;
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(micStream);
+      analyser = audioContext.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+      freqData = new Float32Array(analyser.fftSize);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      source.connect(processor); processor.connect(audioContext.destination);
+      processor.onaudioprocess = (e) => {
+        if (!isRecording || generation !== recordingGeneration || !ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(floatToPcm16(downsample(e.inputBuffer.getChannelData(0), audioContext.sampleRate, 16000)));
+      };
+      orb.classList.add('recording');
+      return true;
+    } catch (err) { stopAudio(); statusText.textContent = 'Microphone access denied'; console.error(err); return false; }
+  }
+
+  function stopAudio() {
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (audioContext) { audioContext.close(); audioContext = null; }
+    analyser = null; freqData = null; orb.classList.remove('recording');
+  }
+
+  function downsample(buffer, inRate, outRate) {
+    if (inRate === outRate) return buffer;
+    const ratio = inRate / outRate, len = Math.round(buffer.length / ratio);
+    const out = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      const pos = i * ratio, l = Math.floor(pos), r = Math.min(l + 1, buffer.length - 1), w = pos - l;
+      out[i] = buffer[l] * (1 - w) + buffer[r] * w;
+    }
+    return out;
+  }
+
+  function floatToPcm16(samples) {
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) { const v = Math.max(-1, Math.min(1, samples[i])); pcm[i] = v < 0 ? v * 32768 : v * 32767; }
+    return pcm.buffer;
+  }
+
+  // ─── Hold-to-talk ────────────────────────────────────────────────
+  // Use Pointer Events API for unified mouse/touch handling.
+  let recordingGeneration = 0;
+
+  async function startRecording() {
+    if (!modelReady || isRecording || isFinalizing) return;
+    const generation = ++recordingGeneration;
+    isRecording = true;
+    talkBtn.classList.add('holding');
+    talkLabel.textContent = 'Recording...';
+    const ok = await startAudio(generation);
+    if (!ok && generation === recordingGeneration) {
+      isRecording = false;
+      talkBtn.classList.remove('holding');
+      talkLabel.textContent = 'Hold to Transcribe';
+    }
+  }
+
+  function finishRecording() {
+    if (!isRecording) return;
+    isRecording = false;
+    isFinalizing = true;
+    recordingGeneration++;
+    talkBtn.classList.remove('holding');
+    talkLabel.textContent = 'Hold to Transcribe';
+    stopAudio();
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'finalize' }));
+  }
+
+  talkBtn.addEventListener('pointerdown', (e) => {
+    if (!modelReady || isRecording) return;
+    e.preventDefault();
+    talkBtn.setPointerCapture(e.pointerId);
+    startRecording();
+  });
+
+  talkBtn.addEventListener('pointerup', (e) => {
+    if (!isRecording) return;
+    e.preventDefault();
+    finishRecording();
+  });
+
+  talkBtn.addEventListener('pointercancel', (e) => {
+    finishRecording();
+  });
+
+  talkBtn.addEventListener('lostpointercapture', finishRecording);
+  window.addEventListener('blur', finishRecording);
+
+  // Also handle pointerleave to stop if pointer leaves while holding
+  talkBtn.addEventListener('pointerleave', (e) => {
+    if (isRecording && e.buttons === 0) finishRecording();
+  });
+
+  // Keyboard accessibility
+  talkBtn.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !e.repeat && modelReady && !isRecording) {
+      e.preventDefault();
+      startRecording();
+    }
+  });
+  talkBtn.addEventListener('keyup', (e) => {
+    if (e.code === 'Space' && isRecording) {
+      e.preventDefault();
+      finishRecording();
+    }
+  });
+
+  // ─── Animation loop ──────────────────────────────────────────────
+  function animate() {
+    requestAnimationFrame(animate);
+    let rawRMS = 0;
+    if (analyser && freqData) { analyser.getFloatTimeDomainData(freqData); rawRMS = getRMS(freqData); }
+    const normalized = normalizeAmplitude(rawRMS);
+    if (normalized > state.energy) { state.energy += (normalized - state.energy) * LOW_PASS_ATTACK; }
+    else { state.energy += (normalized - state.energy) * LOW_PASS_DECAY; }
+    state.idlePhase += 0.008;
+    const breath = Math.sin(state.idlePhase) * 0.5 + 0.5;
+    state.cloudDrift += 0.004; state.noisePhase += 0.0015;
+
+    const breathScale = IDLE_MIN_SCALE + breath * (IDLE_MAX_SCALE - IDLE_MIN_SCALE);
+    const voiceScale = state.energy * SPEAK_SCALE_BOOST;
+    const totalScale = breathScale + voiceScale;
+    const totalGlowOpacity = Math.min(1, 0.4 + breath * 0.25 + state.energy * SPEAK_GLOW_BOOST);
+    const totalBrightness = Math.min(1, 0.7 + breath * 0.15 + state.energy * 0.4);
+    const cloudDriftAmount = 10 + state.energy * 40;
+    const cloudOpacity = 0.35 + state.energy * 0.35;
+    const highlightOpacity = 0.15 + state.energy * 0.2;
+
+    orb.style.transform = `translate(-50%, -50%) scale(${totalScale.toFixed(4)})`;
+    orb.style.filter = `blur(0.5px) brightness(${totalBrightness.toFixed(3)})`;
+    orbGlow.style.opacity = totalGlowOpacity.toFixed(3);
+    orbGlow.style.transform = `translate(-50%, -50%) scale(${(totalScale * 1.15).toFixed(4)})`;
+    const cloudAngle = state.cloudDrift;
+    orbClouds.style.opacity = cloudOpacity.toFixed(3);
+    orbClouds.style.transform = `translate(calc(-50% + ${(Math.cos(cloudAngle) * cloudDriftAmount).toFixed(1)}px), calc(-50% + ${(Math.sin(cloudAngle * 0.7) * cloudDriftAmount * 0.6).toFixed(1)}px))`;
+    orbNoise.style.opacity = (0.03 + state.energy * 0.02).toFixed(3);
+    orbHighlight.style.opacity = highlightOpacity.toFixed(3);
+
+    if (state.energy > 0.08 && statusText.className !== 'error' && statusText.className !== 'loading') {
+      statusText.textContent = 'Listening…'; statusText.className = 'speaking';
+    } else if (statusText.className === 'speaking') {
+      statusText.textContent = modelReady ? 'Ready — hold to transcribe' : 'Click to begin'; statusText.className = '';
+    }
+  }
+
+  loadModelBtn.onclick = () => { if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket(); loadModelBtn.disabled = true; };
+  requestAnimationFrame(animate);
+  connectWebSocket();
+})();
 </script>
 </body>
 </html>

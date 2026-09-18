@@ -6,6 +6,8 @@ from typing import Any
 class TranscriptEvent:
     type: str
     text: str = ""
+    committed: str = ""
+    active_only: bool | None = None
     confidence: float | None = None
     start_ms: int | None = None
     end_ms: int | None = None

@@ -3,216 +3,556 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Voice Activity Indicator</title>
+  <title>Ambient Voice Orb</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    body {
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
       background: #000;
-      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    }
+
+    body {
       display: flex;
       align-items: center;
       justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-    .voice-indicator {
       position: relative;
-      width: 120px;
-      height: 120px;
     }
-    .orb {
+
+    /* ─── Status / transcript overlay ──────────────────────────────── */
+    #status {
+      position: fixed;
+      bottom: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.35);
+      font-size: 13px;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      text-align: center;
+      pointer-events: none;
+      user-select: none;
+      transition: color 0.6s ease;
+    }
+    #status.speaking { color: rgba(255, 255, 255, 0.55); }
+    #status.error   { color: rgba(255, 100, 100, 0.6); }
+
+    #transcript {
+      position: fixed;
+      bottom: 90px;
+      left: 50%;
+      transform: translateX(-50%);
+      max-width: 80vw;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 15px;
+      line-height: 1.6;
+      pointer-events: none;
+      user-select: none;
+      transition: color 0.4s ease;
+      word-break: break-word;
+    }
+
+    /* ─── Connection indicator ────────────────────────────────────── */
+    #conn {
+      position: fixed;
+      top: 30px;
+      right: 30px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.15);
+      transition: background 0.4s ease, box-shadow 0.4s ease;
+    }
+    #conn.ready { background: #5ac8fa; box-shadow: 0 0 10px rgba(90, 200, 250, 0.5); }
+    #conn.speaking { background: #5ac8fa; box-shadow: 0 0 14px rgba(90, 200, 250, 0.7); }
+    #conn.error { background: #ff6464; box-shadow: 0 0 10px rgba(255, 100, 100, 0.5); }
+
+    /* ─── Orb container (centered) ────────────────────────────────── */
+    #orb-container {
+      position: relative;
+      width: 340px;
+      height: 340px;
+      /* Fixed size keeps the circle perfect */
+      flex-shrink: 0;
+    }
+
+    /* ─── Soft outer glow layer ───────────────────────────────────── */
+    .orb-glow {
       position: absolute;
       top: 50%;
       left: 50%;
+      width: 400px;
+      height: 400px;
       transform: translate(-50%, -50%);
       border-radius: 50%;
-      background: radial-gradient(circle at 30% 30%, #fff 0%, #888 50%, #000 100%);
-      box-shadow: 
-        0 0 60px rgba(255,255,255,0.4),
-        0 0 120px rgba(255,255,255,0.2),
-        inset 0 0 60px rgba(255,255,255,0.1);
+      background: radial-gradient(circle, rgba(80, 130, 255, 0.08) 0%, transparent 70%);
+      filter: blur(40px);
+      pointer-events: none;
+      /* animation-driven: opacity, transform scale */
     }
-    .orb::before {
+
+    /* ─── Main orb ────────────────────────────────────────────────── */
+    #orb {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 280px;
+      height: 280px;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      will-change: transform, filter, background;
+      pointer-events: none;
+      /* The orb uses multiple layered radial gradients to create depth */
+      background:
+        radial-gradient(
+          ellipse 65% 75% at 38% 30%,
+          rgba(140, 180, 255, 0.95) 0%,
+          rgba(100, 140, 255, 0.75) 15%,
+          rgba(60, 100, 220, 0.45) 35%,
+          rgba(30, 50, 140, 0.25) 55%,
+          rgba(10, 20, 60, 0.12) 75%,
+          transparent 100%
+        ),
+        radial-gradient(
+          ellipse 80% 60% at 60% 70%,
+          rgba(200, 220, 255, 0.6) 0%,
+          rgba(160, 190, 255, 0.35) 20%,
+          rgba(80, 120, 220, 0.15) 45%,
+          transparent 70%
+        ),
+        radial-gradient(
+          ellipse 50% 50% at 45% 45%,
+          rgba(180, 210, 255, 0.5) 0%,
+          transparent 60%
+        );
+      /* Soft edge: inner shadow + slight blur */
+      box-shadow:
+        inset 0 0 80px rgba(255, 255, 255, 0.06),
+        inset 0 0 30px rgba(140, 180, 255, 0.1);
+      filter: blur(0.5px);
+    }
+
+    /* ─── Internal volumetric cloud / mist layer ──────────────────── */
+    #orb-clouds {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 280px;
+      height: 280px;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      overflow: hidden;
+      pointer-events: none;
+      mix-blend-mode: screen;
+      will-change: transform, opacity;
+    }
+
+    #orb-clouds::before,
+    #orb-clouds::after {
       content: '';
       position: absolute;
-      top: -20px;
-      left: -20px;
-      right: -20px;
-      bottom: -20px;
       border-radius: 50%;
-      background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.3) 0%, transparent 70%);
+      will-change: transform, opacity;
+    }
+
+    /* Cloud layer 1: soft drifting mist */
+    #orb-clouds::before {
+      top: 10%;
+      left: -20%;
+      width: 90%;
+      height: 70%;
+      background: radial-gradient(
+        ellipse 60% 80% at 50% 50%,
+        rgba(200, 220, 255, 0.35) 0%,
+        rgba(150, 180, 255, 0.15) 40%,
+        transparent 70%
+      );
       filter: blur(20px);
-      opacity: 0;
-      animation: glow 3s ease-in-out infinite;
     }
-    .ring {
+
+    /* Cloud layer 2: deeper, warmer glow at the bottom */
+    #orb-clouds::after {
+      bottom: 5%;
+      right: -15%;
+      width: 80%;
+      height: 60%;
+      background: radial-gradient(
+        ellipse 70% 60% at 50% 50%,
+        rgba(180, 210, 255, 0.3) 0%,
+        rgba(120, 160, 255, 0.1) 50%,
+        transparent 80%
+      );
+      filter: blur(25px);
+    }
+
+    /* ─── Noise / grain texture to prevent banding ────────────────── */
+    #orb-noise {
       position: absolute;
       top: 50%;
       left: 50%;
+      width: 280px;
+      height: 280px;
       transform: translate(-50%, -50%);
       border-radius: 50%;
-      border: 1px solid rgba(255,255,255,0.15);
+      overflow: hidden;
       pointer-events: none;
+      opacity: 0.035;
+      will-change: opacity;
+      mix-blend-mode: overlay;
     }
-    .ring:nth-child(2) { width: 140px; height: 140px; animation: pulse-ring 2s ease-out infinite; }
-    .ring:nth-child(3) { width: 180px; height: 180px; animation: pulse-ring 2s ease-out infinite 0.4s; }
-    .ring:nth-child(4) { width: 220px; height: 220px; animation: pulse-ring 2s ease-out infinite 0.8s; }
-    .wave-container {
+
+    #orb-noise::before {
+      content: '';
       position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 100px;
-      height: 100px;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 200px 200px;
     }
-    .wave-bar {
+
+    /* ─── Specular highlight (very subtle) ────────────────────────── */
+    #orb-highlight {
       position: absolute;
-      bottom: 0;
-      width: 8px;
-      background: linear-gradient(to top, #fff, #888);
-      border-radius: 4px;
-      transform-origin: bottom center;
-      transform: scaleY(0.1);
-    }
-    .wave-bar:nth-child(1) { left: 10px; animation: wave 1.2s ease-in-out infinite; }
-    .wave-bar:nth-child(2) { left: 26px; animation: wave 1.2s ease-in-out infinite 0.1s; }
-    .wave-bar:nth-child(3) { left: 42px; animation: wave 1.2s ease-in-out infinite 0.2s; }
-    .wave-bar:nth-child(4) { left: 58px; animation: wave 1.2s ease-in-out infinite 0.3s; }
-    .wave-bar:nth-child(5) { left: 74px; animation: wave 1.2s ease-in-out infinite 0.4s; }
-    .status-text {
-      position: absolute;
-      bottom: -50px;
-      left: 50%;
-      transform: translateX(-50%);
-      color: #888;
-      font-size: 14px;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
-    @keyframes pulse-ring {
-      0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0.6; }
-      100% { transform: translate(-50%, -50%) scale(1.4); opacity: 0; }
-    }
-    @keyframes glow {
-      0%, 100% { opacity: 0.3; transform: scale(1); }
-      50% { opacity: 0.6; transform: scale(1.1); }
-    }
-    @keyframes wave {
-      0%, 100% { transform: scaleY(0.1); opacity: 0.4; }
-      50% { transform: scaleY(1); opacity: 1; }
-    }
-    .state-listening .orb { animation: breathe 4s ease-in-out infinite; }
-    .state-listening .orb::before { animation: glow 4s ease-in-out infinite; }
-    .state-speaking .orb { animation: speak 0.3s ease-in-out infinite; }
-    .state-speaking .orb::before { animation: glow 0.3s ease-in-out infinite; }
-    .state-speaking .wave-bar { animation-duration: 0.15s; }
-    .state-thinking .orb { animation: think 2s ease-in-out infinite; }
-    .state-thinking .orb::before { animation: glow 2s ease-in-out infinite; }
-    .state-thinking .ring { animation-duration: 1.5s; }
-    @keyframes breathe {
-      0%, 100% { transform: translate(-50%, -50%) scale(1); }
-      50% { transform: translate(-50%, -50%) scale(1.15); }
-    }
-    @keyframes speak {
-      0%, 100% { transform: translate(-50%, -50%) scale(1); }
-      50% { transform: translate(-50%, -50%) scale(1.08); }
-    }
-    @keyframes think {
-      0%, 100% { transform: translate(-50%, -50%) scale(1) rotate(0deg); }
-      25% { transform: translate(-50%, -50%) scale(1.05) rotate(90deg); }
-      50% { transform: translate(-50%, -50%) scale(1) rotate(180deg); }
-      75% { transform: translate(-50%, -50%) scale(1.05) rotate(270deg); }
-    }
-    .controls {
-      position: fixed;
-      bottom: 30px;
-      left: 50%;
-      transform: translateX(-50%);
-      display: flex;
-      gap: 12px;
-    }
-    .controls button {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.15);
-      color: #aaa;
-      padding: 10px 24px;
-      border-radius: 30px;
-      font-size: 13px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    .controls button:hover {
-      background: rgba(255,255,255,0.1);
-      border-color: rgba(255,255,255,0.3);
-      color: #fff;
-    }
-    .controls button.active {
-      background: rgba(255,255,255,0.2);
-      border-color: rgba(255,255,255,0.4);
-      color: #fff;
+      top: 22%;
+      left: 28%;
+      width: 60px;
+      height: 40px;
+      border-radius: 50%;
+      background: radial-gradient(
+        ellipse at 50% 50%,
+        rgba(255, 255, 255, 0.18) 0%,
+        rgba(255, 255, 255, 0.05) 40%,
+        transparent 70%
+      );
+      filter: blur(6px);
+      pointer-events: none;
+      will-change: opacity;
+      transform: rotate(-15deg);
     }
   </style>
 </head>
 <body>
-  <div class="voice-indicator" id="indicator">
-    <div class="ring"></div>
-    <div class="ring"></div>
-    <div class="ring"></div>
-    <div class="orb"></div>
-    <div class="wave-container">
-      <div class="wave-bar"></div>
-      <div class="wave-bar"></div>
-      <div class="wave-bar"></div>
-      <div class="wave-bar"></div>
-      <div class="wave-bar"></div>
-    </div>
-    <div class="status-text" id="status">Listening</div>
+
+  <div id="conn" title="Connection status"></div>
+
+  <div id="orb-container">
+    <div class="orb-glow" id="orb-glow"></div>
+    <div id="orb-clouds"></div>
+    <div id="orb-noise"></div>
+    <div id="orb-highlight"></div>
+    <div id="orb"></div>
   </div>
-  <div class="controls">
-    <button data-state="listening" class="active">Listening</button>
-    <button data-state="speaking">Speaking</button>
-    <button data-state="thinking">Thinking</button>
-    <button data-state="idle">Idle</button>
-  </div>
-  <script>
-    const indicator = document.getElementById('indicator');
-    const status = document.getElementById('status');
-    const buttons = document.querySelectorAll('.controls button');
-    
-    const states = {
-      listening: 'Listening',
-      speaking: 'Speaking',
-      thinking: 'Thinking',
-      idle: 'Idle'
-    };
-    
-    function setState(state) {
-      indicator.className = 'voice-indicator';
-      if (state !== 'idle') {
-        indicator.classList.add(`state-${state}`);
-      }
-      status.textContent = states[state];
-      buttons.forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.state === state);
-      });
+
+  <div id="transcript"></div>
+  <div id="status">Click to begin</div>
+
+<script>
+// ──────────────────────────────────────────────────────────────────────
+//  AMBIENT VOICE-REACTIVE ORB
+//
+//  Architecture:
+//    Mic → AudioContext → AnalyserNode → RMS → Normalization → Low-pass
+//    filter → Animation parameters → Orb DOM transforms
+//
+//  The orb reacts to voice amplitude with organic, fluid, slow motion.
+// ──────────────────────────────────────────────────────────────────────
+
+(() => {
+  'use strict';
+
+  // ─── DOM refs ────────────────────────────────────────────────────
+  const orb          = document.getElementById('orb');
+  const orbGlow      = document.getElementById('orb-glow');
+  const orbClouds    = document.getElementById('orb-clouds');
+  const orbNoise     = document.getElementById('orb-noise');
+  const orbHighlight = document.getElementById('orb-highlight');
+  const conn         = document.getElementById('conn');
+  const statusEl     = document.getElementById('status');
+  const transcriptEl = document.getElementById('transcript');
+
+  // ─── Audio-reactive animation state ──────────────────────────────
+  // All visual parameters are driven by `energy` — a smoothed 0..1 value.
+  const state = {
+    energy: 0,          // current smoothed energy (0..1)
+    targetEnergy: 0,    // where we're heading
+    idlePhase: 0,       // idle breathing cycle phase (radians)
+    cloudDrift: 0,      // internal cloud drift phase
+    noisePhase: 0,      // noise animation phase
+    speaking: false,    // is there active speech?
+    speakingSince: 0,   // timestamp when current speech started
+    silenceSince: 0,    // timestamp when silence began
+  };
+
+  // ─── Low-pass filter (exponential smoothing) ─────────────────────
+  // Critical: prevents the orb from jittering with raw mic volume.
+  const LOW_PASS_ATTACK = 0.15;   // smoothing factor when energy increases
+  const LOW_PASS_DECAY  = 0.08;   // smoothing factor when energy decreases
+  const SILENCE_THRESHOLD = 0.04; // below this, consider silent
+  const IDLE_MIN_SCALE = 0.98;    // orb scale at rest
+  const IDLE_MAX_SCALE = 1.03;    // max breathing scale
+  const SPEAK_SCALE_BOOST = 0.14; // additional scale from voice energy
+  const SPEAK_GLOW_BOOST = 0.35;  // additional glow from voice energy
+
+  // ─── Audio setup ─────────────────────────────────────────────────
+  let audioContext = null;
+  let analyser = null;
+  let micStream = null;
+  let freqData = null;
+  let ws = null;
+
+  // RMS / amplitude analysis
+  function getRMS(array) {
+    let sum = 0;
+    for (let i = 0; i < array.length; i++) {
+      sum += array[i] * array[i];
     }
-    
-    buttons.forEach(btn => {
-      btn.addEventListener('click', () => setState(btn.dataset.state));
-    });
-    
-    setState('listening');
-    
-    let currentState = 'listening';
-    const stateKeys = Object.keys(states);
-    setInterval(() => {
-      currentState = stateKeys[(stateKeys.indexOf(currentState) + 1) % stateKeys.length];
-      setState(currentState);
-    }, 4000);
-  </script>
+    return Math.sqrt(sum / array.length);
+  }
+
+  function normalizeAmplitude(rms) {
+    // Typical RMS range for speech: 0.005 – 0.2
+    // Map to 0..1 with gentle clipping
+    const min = 0.01;
+    const max = 0.18;
+    let normalized = (rms - min) / (max - min);
+    return Math.max(0, Math.min(1, normalized));
+  }
+
+  // ─── WebSocket ASR connection ────────────────────────────────────
+  function connectWebSocket() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/v1/transcribe/stream`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      conn.className = 'ready';
+      statusEl.textContent = 'Model loading…';
+    };
+
+    ws.onmessage = ({ data }) => {
+      const event = JSON.parse(data);
+      if (event.type === 'session_started') {
+        conn.className = 'ready';
+      } else if (event.type === 'model_ready') {
+        conn.className = 'ready';
+        statusEl.textContent = 'Speak now';
+      } else if (event.type === 'model_loading') {
+        statusEl.textContent = 'Loading model…';
+      } else if (event.type === 'partial_transcript') {
+        transcriptEl.textContent = event.text || '';
+        conn.className = 'speaking';
+      } else if (event.type === 'final_transcript') {
+        transcriptEl.textContent = event.text || '';
+        conn.className = 'ready';
+      } else if (event.type === 'speech_started') {
+        state.speaking = true;
+        state.speakingSince = performance.now();
+        conn.className = 'speaking';
+      } else if (event.type === 'speech_ended') {
+        state.speaking = false;
+        state.silenceSince = performance.now();
+        conn.className = 'ready';
+      } else if (event.type === 'session_finished') {
+        conn.className = 'ready';
+      } else if (event.type === 'error') {
+        conn.className = 'error';
+        statusEl.textContent = 'Error: ' + (event.error || 'unknown');
+        statusEl.className = 'error';
+      }
+    };
+
+    ws.onerror = () => {
+      conn.className = 'error';
+      statusEl.textContent = 'Connection error';
+      statusEl.className = 'error';
+    };
+
+    ws.onclose = () => {
+      conn.className = '';
+      statusEl.textContent = 'Disconnected';
+      // Attempt reconnect after a delay
+      setTimeout(connectWebSocket, 2000);
+    };
+  }
+
+  // ─── Audio pipeline ──────────────────────────────────────────────
+  async function startAudio() {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
+
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioContext.createMediaStreamSource(micStream);
+
+      // Analyser for amplitude (time-domain) — enough for energy
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+      freqData = new Float32Array(analyser.fftSize);
+
+      // PCM resampler: capture audio for ASR every 250ms
+      const SCRIPT_BUFFER = 4096;
+      const processor = audioContext.createScriptProcessor(SCRIPT_BUFFER, 1, 1);
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      processor.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const mono = e.inputBuffer.getChannelData(0);
+        // Downsample to 16kHz
+        const ds = downsample(mono, audioContext.sampleRate, 16000);
+        const pcm = floatToPcm16(ds);
+        ws.send(pcm);
+      };
+
+    } catch (err) {
+      statusEl.textContent = 'Microphone access denied';
+      statusEl.className = 'error';
+      console.error(err);
+    }
+  }
+
+  function downsample(buffer, inputRate, outputRate) {
+    if (inputRate === outputRate) return buffer;
+    const ratio = inputRate / outputRate;
+    const outputLength = Math.round(buffer.length / ratio);
+    const output = new Float32Array(outputLength);
+    for (let i = 0; i < outputLength; i++) {
+      const position = i * ratio;
+      const left = Math.floor(position);
+      const right = Math.min(left + 1, buffer.length - 1);
+      const weight = position - left;
+      output[i] = buffer[left] * (1 - weight) + buffer[right] * weight;
+    }
+    return output;
+  }
+
+  function floatToPcm16(samples) {
+    const pcm = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const v = Math.max(-1, Math.min(1, samples[i]));
+      pcm[i] = v < 0 ? v * 32768 : v * 32767;
+    }
+    return pcm.buffer;
+  }
+
+  // ─── Animation loop ──────────────────────────────────────────────
+  // Uses requestAnimationFrame for smooth 60fps rendering.
+  // All parameters are interpolated, never set directly from mic data.
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+
+    // Update analyser if available
+    let rawRMS = 0;
+    if (analyser && freqData) {
+      analyser.getFloatTimeDomainData(freqData);
+      rawRMS = getRMS(freqData);
+    }
+
+    const normalized = normalizeAmplitude(rawRMS);
+    const isSilent = normalized < SILENCE_THRESHOLD;
+
+    // Low-pass filter: separate attack/decay for organic feel
+    if (normalized > state.energy) {
+      // Attack: energy increasing → faster response
+      state.energy += (normalized - state.energy) * LOW_PASS_ATTACK;
+    } else {
+      // Decay: energy decreasing → slow, graceful decay
+      state.energy += (normalized - state.energy) * LOW_PASS_DECAY;
+    }
+
+    // Idle breathing — always active, a slow sine wave
+    state.idlePhase += 0.008; // ~0.5 rad/sec → ~12.5s per breath cycle
+    const breath = Math.sin(state.idlePhase) * 0.5 + 0.5; // 0..1
+
+    // Internal cloud drift — continuous slow morphing
+    state.cloudDrift += 0.004;
+    state.noisePhase += 0.0015;
+
+    // ─── Compose visual parameters ────────────────────────────────
+    // Scale: idle breathing + voice reactivity
+    const breathScale = IDLE_MIN_SCALE + breath * (IDLE_MAX_SCALE - IDLE_MIN_SCALE);
+    const voiceScale = state.energy * SPEAK_SCALE_BOOST;
+    const totalScale = breathScale + voiceScale;
+
+    // Glow: subtle outer glow, intensified with speech
+    const idleGlowOpacity = 0.4 + breath * 0.25;
+    const voiceGlow = state.energy * SPEAK_GLOW_BOOST;
+    const totalGlowOpacity = Math.min(1, idleGlowOpacity + voiceGlow);
+
+    // Brightness — the orb gets brighter when speaking
+    const idleBrightness = 0.7 + breath * 0.15;
+    const voiceBrightness = state.energy * 0.4;
+    const totalBrightness = Math.min(1, idleBrightness + voiceBrightness);
+
+    // Internal cloud movement — more energetic with speech
+    const cloudDriftAmount = 10 + state.energy * 40;
+    const cloudOpacity = 0.35 + state.energy * 0.35;
+
+    // Specular highlight — brighter when speaking
+    const highlightOpacity = 0.15 + state.energy * 0.2;
+
+    // ─── Apply transforms ─────────────────────────────────────────
+    orb.style.transform = `translate(-50%, -50%) scale(${totalScale.toFixed(4)})`;
+    orb.style.filter = `blur(0.5px) brightness(${totalBrightness.toFixed(3)})`;
+
+    orbGlow.style.opacity = totalGlowOpacity.toFixed(3);
+    orbGlow.style.transform = `translate(-50%, -50%) scale(${(totalScale * 1.15).toFixed(4)})`;
+
+    // Clouds: drift in a slow circular pattern + react to voice
+    const cloudAngle = state.cloudDrift;
+    const cloudX = Math.cos(cloudAngle) * cloudDriftAmount;
+    const cloudY = Math.sin(cloudAngle * 0.7) * cloudDriftAmount * 0.6;
+    orbClouds.style.opacity = cloudOpacity.toFixed(3);
+    orbClouds.style.transform = `translate(calc(-50% + ${cloudX.toFixed(1)}px), calc(-50% + ${cloudY.toFixed(1)}px))`;
+
+    // Noise subtle shimmer
+    orbNoise.style.opacity = (0.03 + state.energy * 0.02).toFixed(3);
+
+    // Specular highlight reacts to voice
+    orbHighlight.style.opacity = highlightOpacity.toFixed(3);
+
+    // ─── Status text management ───────────────────────────────────
+    if (state.energy > 0.08) {
+      statusEl.textContent = 'Listening…';
+      statusEl.className = 'speaking';
+    } else if (statusEl.className !== 'error') {
+      statusEl.textContent = 'Speak now';
+      statusEl.className = '';
+    }
+  }
+
+  // ─── Init ────────────────────────────────────────────────────────
+  // Start animation loop immediately (idle breathing before any mic)
+  requestAnimationFrame(animate);
+
+  // Connect WebSocket for ASR
+  connectWebSocket();
+
+  // Start audio on first user interaction (required by browsers)
+  const startOnInteraction = async () => {
+    await startAudio();
+    document.removeEventListener('click', startOnInteraction);
+    document.removeEventListener('touchstart', startOnInteraction);
+    statusEl.textContent = 'Model loading…';
+  };
+  document.addEventListener('click', startOnInteraction, { once: true });
+  document.addEventListener('touchstart', startOnInteraction, { once: true });
+
+})();
+</script>
 </body>
 </html>

@@ -2,38 +2,18 @@
 
 ## Runnable prototype
 
-This repository now includes a local FastAPI/WebSocket vertical slice. It defaults to a deterministic mock ASR backend, so the complete event and terminology pipeline can be tested without downloading model weights or using the network at runtime.
+This repository includes a local FastAPI/WebSocket clinical ASR service. Python 3.12 is required.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+```cmd
+py -3.12 -m venv .venv
+.venv\Scripts\activate
 python -m pip install -r requirements.txt
 python run.py
 ```
 
-Open `http://127.0.0.1:8000/`, click **Start session**, then **Send demo phrase** and **Finalize**. The WebSocket endpoint is `/v1/transcribe/stream`; binary messages are treated as 16 kHz mono PCM chunks. Run tests with `python -m pytest -q`.
+Download the Parakeet model from [Hugging Face](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) and place the model file in `models/parakeet/`. Create the folder first if it does not exist. Then open `http://127.0.0.1:8000/` and use **Load model**, followed by **Start recording**.
 
-### Parakeet model
-
-The NeMo runtime is optional and the model is not included in git. Install it once with `python -m pip install "nemo_toolkit[asr]>=2.5,<3"`, then load the 2.47 GB checkpoint once while online:
-
-```powershell
-$env:ASR_BACKEND = "parakeet"
-python -c "from clinical_asr.backends import ParakeetStreamingASR; import asyncio; asyncio.run(ParakeetStreamingASR('nvidia/parakeet-tdt-0.6b-v2').start_session())"
-```
-
-The downloaded checkpoint is stored locally at `models/parakeet/parakeet-tdt-0.6b-v2.nemo` and is ignored by git. For fully offline startup:
-
-```powershell
-$env:ASR_BACKEND = "parakeet"
-$env:ASR_MODEL_PATH = "models/parakeet/parakeet-tdt-0.6b-v2.nemo"
-$env:ASR_DEVICE = "cuda"
-python run.py
-```
-
-The current machine has CUDA available through PyTorch and the RTX 3050 is detected. Keep the 2.47 GB model file outside source control.
-
-The mock path is for integration testing only and makes no accuracy or latency claims. The checked-in vocabulary is a small demo fixture; replace it with a licensed, versioned formulary before clinical use.
+The model file is ignored by git and must remain outside source control. The checked-in vocabulary is a small demo fixture; replace it with a licensed, versioned formulary before clinical use.
 
 ## 1. Objective
 
