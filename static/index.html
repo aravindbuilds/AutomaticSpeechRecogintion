@@ -213,9 +213,9 @@
     const hypothesisWords = hypothesis.split(/\s+/);
     const normalizedHypothesis = hypothesisWords.map(normalize);
 
-    // The active rolling window can restart from an older phrase already
-    // present in the committed transcript. Remove that repeated context
-    // before rendering the grey tail.
+    // A revised hypothesis can repeat context already present in the
+    // committed transcript. Remove that repeated context before rendering
+    // the grey tail.
     for (let size = Math.min(committedWords.length, normalizedHypothesis.length); size >= 2; size--) {
       const prefix = normalizedHypothesis.slice(0, size).join(' ');
       for (let start = 0; start <= committedWords.length - size; start++) {

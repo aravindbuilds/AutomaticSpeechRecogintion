@@ -11,7 +11,22 @@ python -m pip install -r requirements.txt
 python run.py
 ```
 
-Download the Parakeet model from [Hugging Face](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) and place the model file in `models/parakeet/`. Create the folder first if it does not exist. Then open `http://127.0.0.1:8000/` and use **Load model**, followed by **Start recording**.
+Download a streaming checkpoint once (cached locally, then fully offline) and place any
+offline `.nemo` fallback in `models/`. Then open `http://127.0.0.1:8000/` and use **Load model**, followed by **Start recording**.
+
+```cmd
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+python run.py
+```
+
+Default backend (`ASR_BACKEND=nemotron`) loads `nvidia/nemotron-speech-streaming-en-0.6b`.
+Weights auto-download into `models/<repo-slug>/*.nemo` on first use (needs network
+once), then run fully offline. For the existing offline file, use
+`ASR_BACKEND=offline` with `ASR_MODEL_PATH=models/parakeet/parakeet-tdt-0.6b-v3.nemo`
+— already present, no download. `ASR_MODELS_DIR` overrides the weights folder.
+Model files are ignored by git and must remain outside source control.
 
 The model file is ignored by git and must remain outside source control. The checked-in vocabulary is a small demo fixture; replace it with a licensed, versioned formulary before clinical use.
 
@@ -133,24 +148,33 @@ Fine-tuning comes after establishing the baseline.
 
 ## Primary candidate
 
-### NVIDIA Parakeet Unified 0.6B
+### NVIDIA Nemotron ASR Streaming 0.6B (`nvidia/nemotron-speech-streaming-en-0.6b`)
 
-Use as the first model to benchmark and deploy if its performance on the target hardware/audio is satisfactory.
+True cache-aware streaming: each frame processed once, encoder caches reused —
+no buffered re-decode, so no missing/repeated words from windowing.
 
 Reasons:
 
-- Native streaming architecture
-- FastConformer/RNN-T based
-- Small enough for local deployment
-- Designed for low-latency streaming
-- Strong published English accuracy
-- Suitable foundation for domain adaptation
+- Cache-aware FastConformer/RNNT, trained for streaming
+- Configurable chunk latency (80/160/560/1120 ms) without retraining
+- Native punctuation and capitalization
+- Small enough for local GPU deployment, runs on CPU too
+- Strong published English accuracy (2.32% WER LibriSpeech test-clean @1.12s)
 
-## Secondary candidate
+## Low-latency alternative
 
-### NVIDIA Nemotron ASR Streaming 0.6B
+### NVIDIA Parakeet Realtime EOU 120M (`nvidia/parakeet_realtime_eou_120m-v1`)
 
-Keep as the main alternative, especially if ultra-low streaming latency is more important than maximum accuracy.
+120M cache-aware streaming model with end-of-utterance detection (80–160 ms).
+No punctuation/capitalization — pick when turn latency matters most.
+
+## Offline fallback
+
+### NVIDIA Parakeet TDT 0.6B (`nvidia/parakeet-tdt-0.6b-v3`)
+
+Offline-only: use via `ASR_BACKEND=offline`, which VAD-segments audio and
+decodes each segment exactly once. Accuracy baseline and CPU fallback, but no
+mid-segment partials.
 
 ## Accuracy baseline
 
@@ -159,6 +183,13 @@ Keep as the main alternative, especially if ultra-low streaming latency is more 
 Use as an offline/general-purpose accuracy baseline.
 
 Do not assume that Whisper's excellent throughput means equivalent interactive streaming latency.
+
+## CPU-only deployment
+
+The `nemotron` backend runs on CPU too (slower; prefer `ASR_CHUNK_RIGHT_CONTEXT=6`
+or `13` to amortize inference). The `offline` backend decodes short VAD segments
+one at a time, so CPU load stays bounded. Set `ASR_DEVICE=cpu` explicitly when no
+GPU is present.
 
 ---
 
@@ -179,6 +210,24 @@ Python:
 The model must be benchmarked on the **actual deployment hardware**.
 
 Do not optimize against a development workstation and assume production performance.
+
+---
+
+# 5b. CPU-only execution
+
+```cmd
+set ASR_BACKEND=nemotron
+set ASR_DEVICE=cpu
+set ASR_CHUNK_RIGHT_CONTEXT=6
+python run.py
+```
+
+## Known limitations
+
+- CPU inference is slower than GPU; prefer chunk `6`/`13` and expect higher
+  time-to-first-partial.
+- The `offline` backend emits partials per completed VAD segment, not mid-segment.
+- Word-level timestamps are not emitted; the contract is partial/committed/final text.
 
 ---
 
@@ -277,6 +326,28 @@ future model
 ```
 
 without rewriting the terminology layer.
+
+## Streaming backends (no rolling window)
+
+There is no sliding-window re-decode, so there is nothing to tune about window
+length or overlap. Both backends process every audio frame exactly once:
+
+- `nemotron` (`NemoCacheAwareStreamingASR`, default) — true cache-aware
+  streaming (`conformer_stream_step` with persistent encoder caches and RNNT
+  hypotheses). The hypothesis is already cumulative; silence pauses and EOU
+  tokens only *promote* text from grey to white. Checkpoints (local after
+  first download): `nvidia/nemotron-speech-streaming-en-0.6b` (PnC),
+  `nvidia/parakeet_realtime_eou_120m-v1` (EOU turn-taking, 80–160 ms),
+  `nvidia/nemotron-3.5-asr-streaming-0.6b` (multilingual). Chunk latency via
+  `ASR_CHUNK_RIGHT_CONTEXT` in `{0,1,6,13}` → `{80,160,560,1120}` ms
+  (default `6` = 560 ms; `1` = 160 ms for low latency).
+- `offline` (`VadSegmentedOfflineASR`) — fallback for offline-only `.nemo`
+  files (e.g. `parakeet-tdt-0.6b-v3.nemo`). Speech is cut at pauses and each
+  segment is decoded exactly once with `transcribe()`. No partials
+  mid-segment; partials arrive per completed segment.
+
+The frontend still receives `committed_transcript` (white), `partial_transcript`
+with `active_only: true` (grey tail), and `final_transcript` (all white).
 
 ---
 

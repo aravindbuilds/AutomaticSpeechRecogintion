@@ -3,9 +3,13 @@ uvicorn[standard]>=0.30,<1
 python-multipart>=0.0.9,<1
 pytest>=8,<9
 httpx>=0.27,<1
-torch==2.7.1
-torchvision==0.22.1
-torchaudio==2.7.1
---extra-index-url https://download.pytorch.org/whl/cu128
-# Install separately when using ASR_BACKEND=parakeet; it brings the local model runtime.
-# nemo_toolkit[asr]>=2.5,<3
+numpy>=1.26
+# Cache-aware streaming backend (NeMo) — required for ASR_BACKEND=nemotron
+# and ASR_BACKEND=offline. Brings the local model runtime.
+nemo_toolkit[asr]>=2.5,<3
+#
+# GPU execution (project venv uses torch 2.14+cu126):
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+#
+# Legacy ASR_BACKEND values "parakeet"/"onnx" now map to the VAD-segmented
+# offline path; the old rolling-window and ONNX-runtime code was removed.

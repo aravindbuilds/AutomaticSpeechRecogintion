@@ -1,25 +1,57 @@
-import asyncio
+"""Streaming ASR backends.
+
+Two local backends, both free of the old rolling-window re-decode that caused
+missing and repeated words:
+
+- :class:`NemoCacheAwareStreamingASR` — true streaming. Each audio frame is
+  processed exactly once; the encoder reuses cached activations
+  (``conformer_stream_step``). No overlap, no text-merge heuristics, so words
+  can neither be dropped at a window edge nor committed twice. Runs locally on
+  GPU (or CPU) via NeMo. Recommended models (all local after first download):
+
+  - ``nvidia/nemotron-speech-streaming-en-0.6b`` (default, 600M, PnC)
+  - ``nvidia/parakeet_realtime_eou_120m-v1`` (120M, EOU turn-taking, no PnC)
+  - ``nvidia/nemotron-3.5-asr-streaming-0.6b`` (multilingual streaming)
+
+- :class:`VadSegmentedOfflineASR` — fallback for offline-only ``.nemo`` files
+  such as ``parakeet-tdt-0.6b-v3.nemo``. Audio is cut at pauses and every
+  segment is decoded exactly once with ``transcribe()``. No sliding window,
+  so again no repeats/drops by construction. No partials mid-segment.
+
+Protocol (unchanged, see ``clinical_asr/main.py``):
+
+- ``push_audio`` returns the new grey tail (delta) or ``None``.
+- ``pending_commit`` / ``consume_pending_commit`` expose the white text.
+- ``finalize`` returns the full cumulative transcript.
+"""
+
+import importlib
 import logging
+import re
 import struct
 import threading
 from abc import ABC, abstractmethod
-from difflib import SequenceMatcher
 from pathlib import Path
 
-import importlib
+import numpy as np
 
 logger = logging.getLogger(__name__)
+
+SAMPLE_RATE = 16000
+SAMPLE_WIDTH = 2
 
 
 def _cuda_available() -> bool:
     try:
         import torch
+
         return bool(torch.cuda.is_available())
     except ImportError:
         return False
 
 
-def _load_parakeet_model(model_name: str, model_path: str, device: str):
+def _load_nemo_model(model_name: str, model_path: str, device: str):
+    """Load a NeMo ASR model once; caller decides streaming vs offline use."""
     nemo = importlib.import_module("nemo.collections.asr.models")
     asr_model = nemo.ASRModel
     if model_path:
@@ -32,6 +64,165 @@ def _load_parakeet_model(model_name: str, model_path: str, device: str):
         model = model.cpu()
     model.eval()
     return model
+
+
+def _repo_slug(model_name: str) -> str:
+    """Last path component of a repo id: ``nvidia/foo`` -> ``foo``."""
+    return model_name.strip().strip("/").split("/")[-1] or "model"
+
+
+def _largest_nemo(directory: Path) -> Path | None:
+    candidates = [path for path in directory.glob("*.nemo") if path.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_size)
+
+
+def _download_checkpoint(repo_id: str, local_dir: Path) -> Path:
+    """Fetch the ``*.nemo`` checkpoint of a repo into ``local_dir``."""
+    try:
+        hub = importlib.import_module("huggingface_hub")
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to download model weights "
+            "(pip install huggingface_hub), or place the .nemo file under "
+            f"{local_dir} manually."
+        ) from exc
+    logger.info(f"Downloading {repo_id} weights to {local_dir} ...")
+    local_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        hub.snapshot_download(
+            repo_id=repo_id, local_dir=str(local_dir), allow_patterns=["*.nemo"]
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to download weights for '{repo_id}': {exc}. "
+            "Pre-place the .nemo file manually to run fully offline."
+        ) from exc
+    checkpoint = _largest_nemo(local_dir)
+    if checkpoint is None:
+        raise RuntimeError(
+            f"Repo '{repo_id}' contains no .nemo checkpoint in {local_dir}."
+        )
+    logger.info(f"Weights ready: {checkpoint}")
+    return checkpoint
+
+
+def ensure_local_checkpoint(
+    model_name: str, model_path: str, models_dir: str | Path
+) -> Path:
+    """Resolve a local ``.nemo`` file, downloading into ``models_dir`` if needed.
+
+    Resolution order:
+
+    1. Explicit ``model_path`` that exists -> use it.
+    2. ``model_name`` that is itself an existing file -> use it.
+    3. ``<slug>.nemo`` anywhere under ``models_dir`` (covers hand-placed
+       layouts like ``models/parakeet/parakeet-tdt-0.6b-v3.nemo``).
+    4. ``*.nemo`` already inside ``models_dir/<slug>/`` -> use it.
+    5. Otherwise download the repo's ``*.nemo`` into ``models_dir/<slug>/``.
+       An explicit-but-missing ``model_path`` under the models tree is used as
+       the download target directory.
+    """
+    models_root = Path(models_dir)
+    if model_path:
+        explicit = Path(model_path)
+        if explicit.is_file():
+            return explicit
+        if model_name and "/" in model_name:
+            logger.warning(f"Configured weight not found: {explicit}; downloading.")
+            return _download_checkpoint(model_name, explicit.parent)
+        raise FileNotFoundError(
+            f"Configured weight not found: {explicit}. Set ASR_MODEL_PATH to an "
+            "existing .nemo file or leave it empty to auto-download."
+        )
+    if model_name:
+        literal = Path(model_name)
+        if literal.is_file():
+            return literal
+        if "/" in model_name:
+            slug = _repo_slug(model_name)
+            recursive = sorted(models_root.rglob(f"{slug}.nemo"))
+            existing_recursive = [path for path in recursive if path.is_file()]
+            if existing_recursive:
+                return existing_recursive[0]
+            local_dir = models_root / slug
+            checkpoint = _largest_nemo(local_dir) if local_dir.is_dir() else None
+            if checkpoint is not None:
+                return checkpoint
+            return _download_checkpoint(model_name, local_dir)
+    raise ValueError(
+        "No model configured: set ASR_MODEL_NAME to a repo id "
+        "(e.g. nvidia/nemotron-speech-streaming-en-0.6b) or ASR_MODEL_PATH "
+        "to a local .nemo file."
+    )
+
+
+def _pcm16_to_float32(audio_bytes: bytes) -> np.ndarray:
+    sample_count = len(audio_bytes) // SAMPLE_WIDTH
+    if sample_count == 0:
+        return np.zeros(0, dtype=np.float32)
+    samples = struct.unpack(f"<{sample_count}h", audio_bytes[: sample_count * SAMPLE_WIDTH])
+    return np.asarray(samples, dtype=np.float32) / 32768.0
+
+
+def _rms(audio_chunk: bytes) -> float:
+    sample_count = len(audio_chunk) // SAMPLE_WIDTH
+    if sample_count == 0:
+        return 0.0
+    samples = struct.unpack(
+        f"<{sample_count}h", audio_chunk[: sample_count * SAMPLE_WIDTH]
+    )
+    mean_square = sum(sample * sample for sample in samples) / sample_count
+    return mean_square**0.5
+
+
+def _extract_text(hyps) -> str:
+    """Hypotheses may be RNNT Hypothesis objects (.text) or plain strings."""
+    parts = []
+    for hyp in hyps or []:
+        text = getattr(hyp, "text", hyp)
+        text = str(text).strip() if text is not None else ""
+        if text:
+            parts.append(text)
+    return " ".join(parts).strip()
+
+
+_EOU_TOKEN_RE = re.compile(r"</?(eou|eob)\s*/?>", re.IGNORECASE)
+
+
+def _strip_eou_markers(text: str) -> tuple[str, bool]:
+    """Remove inline end-of-utterance markers; report if any were present."""
+    cleaned, count = _EOU_TOKEN_RE.subn("", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned, count > 0
+
+
+def _strip_committed_prefix(committed: str, hypothesis: str, max_words: int = 20) -> str:
+    """Display-only tail: drop the already-white prefix from a hypothesis.
+
+    Exact string prefix first; if the streaming decoder revised recent words,
+    fall back to a bounded word-overlap so the grey tail never repeats white
+    text. Never touches the cumulative transcript.
+    """
+    committed = committed.strip()
+    hypothesis = hypothesis.strip()
+    if not committed:
+        return hypothesis
+    if not hypothesis:
+        return ""
+    if hypothesis.startswith(committed):
+        return hypothesis[len(committed):].strip()
+    committed_words = committed.split()
+    hypothesis_words = hypothesis.split()
+    normalize = lambda word: word.strip(".,!?;:").lower()
+    committed_norm = [normalize(word) for word in committed_words]
+    hypothesis_norm = [normalize(word) for word in hypothesis_words]
+    limit = min(max_words, len(committed_norm), len(hypothesis_norm))
+    for size in range(limit, 0, -1):
+        if committed_norm[-size:] == hypothesis_norm[:size]:
+            return " ".join(hypothesis_words[size:])
+    return hypothesis
 
 
 class StreamingASR(ABC):
@@ -72,181 +263,147 @@ class MockStreamingASR(StreamingASR):
         self.audio_bytes = 0
 
 
-class ParakeetStreamingASR(StreamingASR):
-    """
-    Streaming ASR with cumulative transcript tracking.
+class NemoCacheAwareStreamingASR(StreamingASR):
+    """True cache-aware streaming over a locally loaded NeMo streaming model.
 
-    Protocol:
-    - partial_transcript: text = the complete latest audio-window hypothesis
-    - committed_transcript: text = full cumulative text to render as white
-    - final_transcript: text = full cumulative text, everything goes white
-
-    The client renders:
-    - committed text (from committed_transcript) as white
-    - partial text (from partial_transcript) as grey delta appended after
+    Feed-forward only: PCM16 -> per-session ``CacheAwareStreamingAudioBuffer``
+    -> ``conformer_stream_step`` with persistent encoder caches and RNNT
+    hypotheses. The decoder hypothesis is already cumulative, so committing is
+    just promotion (silence pause or EOU token) — nothing is re-decoded.
     """
 
     _model = None
+    _model_key: tuple | None = None
     _model_lock = threading.Lock()
+    _step_lock = threading.Lock()
 
-    SAMPLE_RATE = 16000
-    SAMPLE_WIDTH = 2
-    MAX_AUDIO_SECONDS = 10
-    MAX_AUDIO_BYTES = SAMPLE_RATE * SAMPLE_WIDTH * MAX_AUDIO_SECONDS
-    # Keep a sizeable overlap so the pre/post-trim text can be aligned.
-    TRIM_TARGET_BYTES = SAMPLE_RATE * SAMPLE_WIDTH * 8
-    MIN_INFERENCE_BYTES = 16000
-    # A sustained low-energy interval is treated as a sentence boundary. The
-    # audio is deliberately kept in the rolling buffer; this only promotes
-    # the current hypothesis so resumed speech can continue in the same
-    # session without losing the first words after the pause.
+    # att_context_size right-context frames -> chunk latency (80 ms frames).
+    RIGHT_CONTEXT_LATENCY_MS = {0: 80, 1: 160, 6: 560, 13: 1120}
+
     SILENCE_RMS_THRESHOLD = 500.0
     SILENCE_COMMIT_SECONDS = 0.6
-    SILENCE_COMMIT_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH * SILENCE_COMMIT_SECONDS)
-    # Same-word timestamps within this interval are treated as one boundary
-    # token. Words beginning more than one second apart remain distinct.
-    DUPLICATE_WORD_START_TOLERANCE = 1.0
 
-    def __init__(self, model_name: str, model_path: str = "", device: str = "auto") -> None:
+    def __init__(
+        self,
+        model_name: str = "nvidia/nemotron-speech-streaming-en-0.6b",
+        model_path: str = "",
+        device: str = "auto",
+        right_context: int = 6,
+        models_dir: str | Path = "models",
+    ) -> None:
         self.model_name = model_name
         self.model_path = model_path
         self.device = device
-        self.audio = bytearray()
-        self.last_inference_size = 0
-        self._inference_count = 0
-        self._last_error: str | None = None
-        self._cumulative_text = ""      # full cumulative text (all white)
-        self._cumulative_words: list[dict] = []
-        self._last_buffer_text = ""     # last model output for current buffer
-        self._last_buffer_words: list[dict] = []
-        self._word_evidence: list[dict] = []
-        self._pending_commit = False    # True when we need to send committed_transcript
-        self._silent_audio_bytes = 0
-        self._gap_committed = False
-        self._audio_offset_seconds = 0.0
+        self.right_context = right_context
+        self.models_dir = Path(models_dir)
+        self._buffer = None
+        self._reset_session_state()
 
-    async def start_session(self) -> None:
-        if self.__class__._model is None:
-            with self.__class__._model_lock:
-                if self.__class__._model is None:
-                    try:
-                        self.__class__._model = _load_parakeet_model(
-                            self.model_name, self.model_path, self.device
-                        )
-                    except Exception as exc:
-                        raise RuntimeError(f"Unable to load Parakeet: {exc}") from exc
-        self.audio.clear()
-        self.last_inference_size = 0
-        self._inference_count = 0
-        self._last_error = None
-        self._cumulative_text = ""
-        self._cumulative_words = []
-        self._last_buffer_text = ""
-        self._last_buffer_words = []
-        self._word_evidence = []
+    def _reset_session_state(self) -> None:
+        self._buffer = None
+        self._cache_last_channel = None
+        self._cache_last_time = None
+        self._cache_last_channel_len = None
+        self._previous_hypotheses = None
+        self._previous_pred_out = None
+        self._step_num = 0
+        self._hypothesis = ""
+        self._committed = ""
         self._pending_commit = False
         self._silent_audio_bytes = 0
         self._gap_committed = False
-        self._audio_offset_seconds = 0.0
+
+    async def start_session(self) -> None:
+        self._ensure_model()
+        streaming_utils = importlib.import_module(
+            "nemo.collections.asr.parts.utils.streaming_utils"
+        )
+        model = self.__class__._model
+        encoder = model.encoder
+        if self.right_context is not None and hasattr(
+            encoder, "set_default_att_context_size"
+        ):
+            try:
+                encoder.set_default_att_context_size(
+                    att_context_size=[70, self.right_context]
+                )
+            except Exception as exc:
+                logger.warning(f"Could not set att_context_size: {exc}")
+        self._reset_session_state()
+        self._buffer = streaming_utils.CacheAwareStreamingAudioBuffer(model)
+        cache = encoder.get_initial_cache_state(batch_size=1)
+        (
+            self._cache_last_channel,
+            self._cache_last_time,
+            self._cache_last_channel_len,
+        ) = cache
+
+    def _ensure_model(self) -> None:
+        checkpoint = ensure_local_checkpoint(
+            self.model_name, self.model_path, self.models_dir
+        )
+        key = (str(checkpoint), self.device)
+        if self.__class__._model is not None and self.__class__._model_key == key:
+            return
+        with self.__class__._model_lock:
+            if (
+                self.__class__._model is not None
+                and self.__class__._model_key == key
+            ):
+                return
+            try:
+                model = _load_nemo_model("", str(checkpoint), self.device)
+            except Exception as exc:
+                raise RuntimeError(f"Unable to load streaming model: {exc}") from exc
+            if not hasattr(model, "conformer_stream_step"):
+                raise RuntimeError(
+                    f"Model '{checkpoint}' has no conformer_stream_step — it is "
+                    "offline-only. Use VadSegmentedOfflineASR for offline .nemo "
+                    "files, or a streaming checkpoint "
+                    "(nemotron-speech-streaming-en-0.6b, "
+                    "parakeet_realtime_eou_120m-v1)."
+                )
+            self.__class__._model = model
+            self.__class__._model_key = key
 
     async def push_audio(self, audio_chunk: bytes) -> str | None:
-        self.audio.extend(audio_chunk)
-
-        if self._audio_is_silent(audio_chunk):
+        if self._buffer is None:
+            raise RuntimeError("Session not started; call start_session() first.")
+        if not audio_chunk:
+            return None
+        if _rms(audio_chunk) < self.SILENCE_RMS_THRESHOLD:
             self._silent_audio_bytes += len(audio_chunk)
-        elif audio_chunk:
+        else:
             self._silent_audio_bytes = 0
             self._gap_committed = False
 
-        # --- Before trimming: commit current transcription ---
-        if len(self.audio) > self.MAX_AUDIO_BYTES:
-            # Capture the complete hypothesis for the old window.
-            await self._safe_transcribe(force=True)
-            before_trim_text = self._last_buffer_text
+        waveform = _pcm16_to_float32(audio_chunk)
+        with self.__class__._step_lock:
+            self._buffer.append_audio(waveform)
+            self._drain_new_chunks()
 
-            trim_target = min(self.TRIM_TARGET_BYTES, self.MAX_AUDIO_BYTES)
-            excess = max(0, len(self.audio) - trim_target)
-            cutoff_seconds = self._audio_offset_seconds + excess / (self.SAMPLE_RATE * self.SAMPLE_WIDTH)
-
-            # With timestamps, commit only words that will actually leave
-            # the rolling window. The overlap stays grey after trimming.
-            if self._last_buffer_words:
-                self._commit_words_until(cutoff_seconds)
-            else:
-                self._commit_current_buffer(before_trim_text)
-
-            # Trim by a larger chunk, then infer the actual new window. This
-            # gives us the new grey active-window hypothesis.
-            self.audio = self.audio[excess:]
-            self._audio_offset_seconds += excess / (self.SAMPLE_RATE * self.SAMPLE_WIDTH)
-            self._word_evidence = [
-                word for word in self._word_evidence
-                if float(word.get("end", word.get("start", 0.0))) > self._audio_offset_seconds - 0.05
-            ]
-            self.last_inference_size = 0
-            await self._safe_transcribe(force=True)
-            after_trim_text = self._last_buffer_text
-
-            # If the overflow happened during a pause, promote the new
-            # post-trim hypothesis too. This leaves the buffer intact for
-            # the next words instead of ending/restarting the ASR session.
-            if self._silence_boundary_reached() and not self._gap_committed:
-                self._commit_current_buffer(
-                    after_trim_text,
-                    self._committable_words(include_unstable=True) or self._last_buffer_words,
-                )
-                self._gap_committed = True
-            return self._active_tail(
-                self._cumulative_text, after_trim_text, self._last_buffer_words
-            ) or None
-
-        # Commit once per sustained pause. Do not clear audio or reset the
-        # model context: the next non-silent chunk is still appended to the
-        # same rolling window and can be reconciled against this white text.
-        if self._silence_boundary_reached() and not self._gap_committed:
-            await self._safe_transcribe(force=True)
-            self._commit_current_buffer(
-                self._last_buffer_text,
-                self._committable_words(include_unstable=True) or self._last_buffer_words,
-            )
+        utterance_ended = self._consume_eou_boundary()
+        if utterance_ended and not self._gap_committed:
+            self._promote_commit()
             self._gap_committed = True
-            return self._active_tail(
-                self._cumulative_text, self._last_buffer_text, self._last_buffer_words
-            ) or None
-
-        unprocessed = len(self.audio) - self.last_inference_size
-        if unprocessed >= self.MIN_INFERENCE_BYTES:
-            await self._safe_transcribe()
-            return self._active_tail(
-                self._cumulative_text, self._last_buffer_text, self._last_buffer_words
-            ) or None
-        return None
+        elif self._silence_boundary_reached() and not self._gap_committed:
+            self._promote_commit()
+            self._gap_committed = True
+        return _strip_committed_prefix(self._committed, self._hypothesis) or None
 
     async def push_demo_text(self, text: str) -> str | None:
         raise RuntimeError("mock_text is available only with ASR_BACKEND=mock")
 
     async def finalize(self) -> str:
-        await self._safe_transcribe(force=True)
-        self._commit_current_buffer(
-            self._last_buffer_text,
-            self._committable_words(include_unstable=True) or self._last_buffer_words,
-        )
-        return self._cumulative_text
+        if self._buffer is None:
+            raise RuntimeError("Session not started; call start_session() first.")
+        with self.__class__._step_lock:
+            self._drain_new_chunks()
+        self._promote_commit()
+        return self._committed
 
     async def reset(self) -> None:
-        self.audio.clear()
-        self.last_inference_size = 0
-        self._inference_count = 0
-        self._last_error = None
-        self._cumulative_text = ""
-        self._cumulative_words = []
-        self._last_buffer_text = ""
-        self._last_buffer_words = []
-        self._word_evidence = []
-        self._pending_commit = False
-        self._silent_audio_bytes = 0
-        self._gap_committed = False
-        self._audio_offset_seconds = 0.0
+        self._reset_session_state()
 
     @property
     def pending_commit(self) -> bool:
@@ -254,382 +411,214 @@ class ParakeetStreamingASR(StreamingASR):
 
     @property
     def cumulative_text(self) -> str:
-        return self._cumulative_text
+        return self._committed
 
     def consume_pending_commit(self) -> str:
-        """Get cumulative text and clear pending flag."""
         self._pending_commit = False
-        return self._cumulative_text
+        return self._committed
 
-    def _commit_current_buffer(self, text: str, words: list[dict] | None = None) -> None:
-        """Promote the current hypothesis without dropping its audio."""
-        previous = self._cumulative_text
-        if words:
-            merged_words = self._merge_timestamped_words(self._cumulative_words, words)
-            self._cumulative_words = merged_words
-            self._cumulative_text = self._dedupe_adjacent_text(
-                " ".join(word["word"] for word in merged_words).strip()
+    @property
+    def chunk_latency_ms(self) -> int | None:
+        return self.RIGHT_CONTEXT_LATENCY_MS.get(self.right_context)
+
+    def _drain_new_chunks(self) -> None:
+        """Run cache-aware steps for newly appended audio only."""
+        import torch
+
+        model = self.__class__._model
+        for chunk_audio, chunk_lengths in self._buffer:
+            drop_extra = (
+                0
+                if self._step_num == 0
+                else model.encoder.streaming_cfg.drop_extra_pre_encoded
             )
-        else:
-            self._cumulative_text = self._dedupe_adjacent_text(
-                self._append_segment(previous, text)
-            )
-        self._pending_commit = self._pending_commit or self._cumulative_text != previous
-
-    def _commit_words_until(self, cutoff_seconds: float) -> None:
-        """Commit observed words that have left the rolling window."""
-        words = self._committable_words(cutoff_seconds)
-        eligible = [
-            word for word in words
-            if float(word.get("end", word.get("start", 0.0))) <= cutoff_seconds + 0.05
-        ]
-        if eligible:
-            self._commit_current_buffer("", eligible)
-
-    def _committable_words(
-        self,
-        cutoff_seconds: float | None = None,
-        include_unstable: bool = False,
-    ) -> list[dict]:
-        """Return timestamped words with enough evidence to retain.
-
-        A word seen in two hypotheses is stable. Words from the latest
-        hypothesis are also allowed through so the first inference of a new
-        phrase is not delayed; older hypotheses are retained when the latest
-        decode temporarily drops a word.
-        """
-        if not self._word_evidence:
-            return []
-        latest = self._inference_count
-        words = [
-            word for word in self._word_evidence
-            if (
-                include_unstable
-                or word.get("seen_count", 0) >= 2
-                or word.get("last_seen") == latest
-            )
-            and (
-                cutoff_seconds is None
-                or float(word.get("end", word.get("start", 0.0))) <= cutoff_seconds + 0.05
-            )
-        ]
-        return self._collapse_adjacent_timestamp_duplicates(words)
-
-    def _observe_words(self, words: list[dict]) -> None:
-        """Accumulate short-lived timestamp evidence across ASR updates."""
-        for incoming in self._collapse_adjacent_timestamp_duplicates(words):
-            start = float(incoming.get("start", 0.0))
-            end = float(incoming.get("end", start))
-            match = None
-            best_distance = float("inf")
-            for existing in self._word_evidence:
-                existing_start = float(existing.get("start", 0.0))
-                existing_end = float(existing.get("end", existing_start))
-                overlap = max(0.0, min(end, existing_end) - max(start, existing_start))
-                distance = abs(start - existing_start)
-                if overlap > 0.04 or distance <= 0.22:
-                    if distance < best_distance:
-                        match = existing
-                        best_distance = distance
-            if match is None:
-                self._word_evidence.append({
-                    **incoming,
-                    "seen_count": 1,
-                    "last_seen": self._inference_count,
-                })
-            else:
-                # Keep the newest spelling/capitalization while preserving
-                # the original timing anchor for stable alignment.
-                match["word"] = incoming["word"]
-                match["seen_count"] = match.get("seen_count", 0) + 1
-                match["last_seen"] = self._inference_count
-        self._word_evidence = self._collapse_adjacent_timestamp_duplicates(self._word_evidence)
-
-    @classmethod
-    def _same_boundary_word(cls, left: dict, right: dict) -> bool:
-        left_word = str(left.get("word", "")).strip(".,!?;:").lower()
-        right_word = str(right.get("word", "")).strip(".,!?;:").lower()
-        if not left_word or left_word != right_word:
-            return False
-        left_start = float(left.get("start", 0.0))
-        right_start = float(right.get("start", 0.0))
-        left_end = float(left.get("end", left_start))
-        right_end = float(right.get("end", right_start))
-        return (
-            abs(left_start - right_start) <= cls.DUPLICATE_WORD_START_TOLERANCE
-            or min(left_end, right_end) - max(left_start, right_start) > 0.04
-        )
-
-    @classmethod
-    def _collapse_adjacent_timestamp_duplicates(cls, words: list[dict]) -> list[dict]:
-        """Collapse stuttered copies produced at a window boundary."""
-        ordered = sorted(words, key=lambda word: float(word.get("start", 0.0)))
-        collapsed: list[dict] = []
-        for word in ordered:
-            if collapsed and cls._same_boundary_word(collapsed[-1], word):
-                # Preserve the most recent spelling while keeping the wider
-                # timing interval for future boundary comparisons.
-                previous = collapsed[-1]
-                previous["word"] = word.get("word", previous.get("word", ""))
-                previous["end"] = max(
-                    float(previous.get("end", previous.get("start", 0.0))),
-                    float(word.get("end", word.get("start", 0.0))),
+            with torch.inference_mode(), torch.no_grad():
+                (
+                    pred_out,
+                    transcribed,
+                    cache_channel,
+                    cache_time,
+                    cache_channel_len,
+                    best_hyp,
+                ) = model.conformer_stream_step(
+                    processed_signal=chunk_audio,
+                    processed_signal_length=chunk_lengths,
+                    cache_last_channel=self._cache_last_channel,
+                    cache_last_time=self._cache_last_time,
+                    cache_last_channel_len=self._cache_last_channel_len,
+                    keep_all_outputs=self._buffer.is_buffer_empty(),
+                    previous_hypotheses=self._previous_hypotheses,
+                    previous_pred_out=self._previous_pred_out,
+                    drop_extra_pre_encoded=drop_extra,
+                    return_transcription=True,
                 )
-                previous["seen_count"] = max(
-                    previous.get("seen_count", 0), word.get("seen_count", 0)
-                )
-                previous["last_seen"] = max(
-                    previous.get("last_seen", 0), word.get("last_seen", 0)
-                )
-                continue
-            collapsed.append(word)
-        return collapsed
+            self._cache_last_channel = cache_channel
+            self._cache_last_time = cache_time
+            self._cache_last_channel_len = cache_channel_len
+            self._previous_pred_out = pred_out
+            # RNNT returns Hypothesis objects; keep them for the next step.
+            try:
+                self._previous_hypotheses = list(best_hyp) if best_hyp else None
+            except TypeError:
+                self._previous_hypotheses = None
+            text = _extract_text(transcribed)
+            if text:
+                self._hypothesis = text
+            self._step_num += 1
 
-    @staticmethod
-    def _merge_timestamped_words(base: list[dict], incoming: list[dict]) -> list[dict]:
-        """Merge words by absolute audio time, keeping each word once."""
-        if not base:
-            return ParakeetStreamingASR._collapse_adjacent_timestamp_duplicates(list(incoming))
-
-        merged = ParakeetStreamingASR._collapse_adjacent_timestamp_duplicates(list(base))
-        boundary = max(float(word.get("end", word.get("start", 0.0))) for word in base)
-        for word in ParakeetStreamingASR._collapse_adjacent_timestamp_duplicates(list(incoming)):
-            if merged and ParakeetStreamingASR._same_boundary_word(merged[-1], word):
-                continue
-            end = float(word.get("end", word.get("start", 0.0)))
-            if end <= boundary + 0.05:
-                continue
-            merged.append(word)
-            boundary = end
-        return ParakeetStreamingASR._collapse_adjacent_timestamp_duplicates(merged)
+    def _consume_eou_boundary(self) -> bool:
+        cleaned, found = _strip_eou_markers(self._hypothesis)
+        if found:
+            self._hypothesis = cleaned
+        return found
 
     def _silence_boundary_reached(self) -> bool:
+        silence_bytes_needed = int(
+            SAMPLE_RATE * SAMPLE_WIDTH * self.SILENCE_COMMIT_SECONDS
+        )
         return (
-            self._silent_audio_bytes >= self.SILENCE_COMMIT_BYTES
-            and bool(self._last_buffer_text.strip())
+            self._silent_audio_bytes >= silence_bytes_needed
+            and bool(self._hypothesis.strip())
         )
 
-    @classmethod
-    def _audio_is_silent(cls, audio_chunk: bytes) -> bool:
-        """Return whether a PCM16 chunk is below the pause threshold."""
-        sample_count = len(audio_chunk) // cls.SAMPLE_WIDTH
-        if sample_count == 0:
-            return True
+    def _promote_commit(self) -> None:
+        if self._hypothesis != self._committed:
+            self._committed = self._hypothesis
+            self._pending_commit = True
 
-        samples = struct.unpack(
-            f"<{sample_count}h",
-            audio_chunk[:sample_count * cls.SAMPLE_WIDTH],
-        )
-        mean_square = sum(sample * sample for sample in samples) / sample_count
-        return mean_square ** 0.5 < cls.SILENCE_RMS_THRESHOLD
 
-    @staticmethod
-    def _append_segment(base: str, segment: str) -> str:
-        """Append a newly committed/window segment without boundary repeats."""
-        base = base.strip()
-        segment = segment.strip()
-        if not base:
-            return segment
-        if not segment:
-            return base
-        if segment.startswith(base):
-            return segment
+class VadSegmentedOfflineASR(StreamingASR):
+    """Fallback for offline-only local ``.nemo`` files (e.g. parakeet-tdt).
 
-        base_words = base.split()
-        segment_words = segment.split()
-        # A rolling hypothesis can restart at an older phrase already inside
-        # the white transcript, rather than at its final word. Treat that
-        # prefix as context so a pause cannot commit the same window again.
-        leading_overlap = ParakeetStreamingASR._leading_overlap(base_words, segment_words)
-        if leading_overlap:
-            segment_words = segment_words[leading_overlap:]
-            if not segment_words:
-                return base
+    Speech is cut at pauses; each segment is decoded exactly once via
+    ``transcribe()`` and appended. No window, no overlap, no merge — repeats
+    and boundary drops are impossible by construction. Trade-off: no partials
+    mid-segment; partials appear per completed segment.
+    """
 
-        overlap = ParakeetStreamingASR._boundary_overlap(base_words, segment_words)
-        if overlap:
-            suffix = " ".join(segment_words[overlap:])
-            return base if not suffix else f"{base} {suffix}"
-        return f"{base} {' '.join(segment_words)}"
+    _model = None
+    _model_key: tuple | None = None
+    _model_lock = threading.Lock()
 
-    @staticmethod
-    def _dedupe_adjacent_text(text: str) -> str:
-        """Remove exact adjacent stutters in text-only fallback output."""
-        words = text.split()
-        result = []
-        for word in words:
-            normalized = word.strip(".,!?;:").lower()
-            if result and normalized == result[-1].strip(".,!?;:").lower():
-                continue
-            result.append(word)
-        return " ".join(result)
+    SILENCE_RMS_THRESHOLD = 500.0
+    SILENCE_COMMIT_SECONDS = 0.6
+    MIN_SEGMENT_SECONDS = 0.4
+    MAX_SEGMENT_SECONDS = 20.0
 
-    @staticmethod
-    def _leading_overlap(base_words: list[str], incoming_words: list[str]) -> int:
-        """Return a repeated incoming prefix found anywhere in the base."""
-        if not base_words or not incoming_words:
-            return 0
-
-        normalize = lambda word: word.strip(".,!?;:").lower()
-        base_norm = [normalize(word) for word in base_words]
-        incoming_norm = [normalize(word) for word in incoming_words]
-
-        # Prefer the longest exact prefix match. Requiring two words avoids
-        # treating a common one-word opener such as "the" as alignment.
-        for size in range(min(len(base_norm), len(incoming_norm)), 1, -1):
-            prefix = incoming_norm[:size]
-            if any(
-                base_norm[start:start + size] == prefix
-                for start in range(len(base_norm) - size + 1)
-            ):
-                return size
-        return 0
-
-    @staticmethod
-    def _boundary_overlap(base_words: list[str], incoming_words: list[str]) -> int:
-        """Return how many incoming words overlap the end of the base."""
-        if not base_words or not incoming_words:
-            return 0
-
-        normalize = lambda word: word.strip(".,!?;:").lower()
-        base_norm = [normalize(word) for word in base_words]
-        incoming_norm = [normalize(word) for word in incoming_words]
-        for size in range(min(len(base_norm), len(incoming_norm)), 1, -1):
-            if base_norm[-size:] == incoming_norm[:size]:
-                return size
-
-        # Permit small ASR revisions while requiring the matching block to
-        # be near the old transcript's end and the new hypothesis's start.
-        matches = SequenceMatcher(None, base_norm, incoming_norm, autojunk=False).get_matching_blocks()
-        candidates = [
-            match for match in matches
-            if match.size >= 2 and match.a + match.size >= len(base_norm) * 0.55
-            and match.b <= max(4, len(incoming_norm) // 4)
-        ]
-        if candidates:
-            match = max(candidates, key=lambda item: (item.size, item.a + item.size))
-            return match.b + match.size
-        return 0
-
-    def _active_tail(
+    def __init__(
         self,
-        committed: str,
-        hypothesis: str,
-        hypothesis_words: list[dict] | None = None,
-    ) -> str:
-        """Remove only the confirmed white/grey boundary overlap."""
-        if hypothesis_words and self._word_evidence:
-            boundary = (
-                max(
-                    float(word.get("end", word.get("start", 0.0)))
-                    for word in self._cumulative_words
-                )
-                if self._cumulative_words
-                else float("-inf")
-            )
-            # Render the union of recent timestamp evidence, not only the
-            # newest decode. A transient omission in one hypothesis should
-            # not make an already observed grey word disappear.
-            observed_words = self._committable_words(include_unstable=True)
-            active_words = [
-                word for word in observed_words
-                if float(word.get("end", word.get("start", 0.0))) > boundary + 0.05
-            ]
-            return self._dedupe_adjacent_text(
-                " ".join(word["word"] for word in active_words).strip()
-            )
+        model_name: str = "nvidia/parakeet-tdt-0.6b-v3",
+        model_path: str = "",
+        device: str = "auto",
+        models_dir: str | Path = "models",
+    ) -> None:
+        self.model_name = model_name
+        self.model_path = model_path
+        self.device = device
+        self.models_dir = Path(models_dir)
+        self._segment = bytearray()
+        self._speech_bytes = 0
+        self._silent_audio_bytes = 0
+        self._committed = ""
+        self._pending_commit = False
 
-        hypothesis_words = hypothesis.strip().split()
-        if not committed.strip() or not hypothesis_words:
-            return self._dedupe_adjacent_text(hypothesis.strip())
-        committed_words = committed.strip().split()
-        overlap = self._leading_overlap(committed_words, hypothesis_words)
-        if overlap:
-            return self._dedupe_adjacent_text(" ".join(hypothesis_words[overlap:]))
+    async def start_session(self) -> None:
+        self._ensure_model()
+        self._segment.clear()
+        self._speech_bytes = 0
+        self._silent_audio_bytes = 0
+        self._committed = ""
+        self._pending_commit = False
 
-        overlap = self._boundary_overlap(committed_words, hypothesis_words)
-        tail = " ".join(hypothesis_words[overlap:]) if overlap else hypothesis.strip()
-        return self._dedupe_adjacent_text(tail)
+    def _ensure_model(self) -> None:
+        checkpoint = ensure_local_checkpoint(
+            self.model_name, self.model_path, self.models_dir
+        )
+        key = (str(checkpoint), self.device)
+        if self.__class__._model is not None and self.__class__._model_key == key:
+            return
+        with self.__class__._model_lock:
+            if (
+                self.__class__._model is not None
+                and self.__class__._model_key == key
+            ):
+                return
+            try:
+                model = _load_nemo_model("", str(checkpoint), self.device)
+            except Exception as exc:
+                raise RuntimeError(f"Unable to load offline model: {exc}") from exc
+            self.__class__._model = model
+            self.__class__._model_key = key
 
-    async def _safe_transcribe(self, force: bool = False) -> str | None:
-        if not self.audio:
+    async def push_audio(self, audio_chunk: bytes) -> str | None:
+        if self.__class__._model is None:
+            raise RuntimeError("Session not started; call start_session() first.")
+        if not audio_chunk:
             return None
+        self._segment.extend(audio_chunk)
+        if _rms(audio_chunk) < self.SILENCE_RMS_THRESHOLD:
+            self._silent_audio_bytes += len(audio_chunk)
+        else:
+            self._speech_bytes += len(audio_chunk)
+            self._silent_audio_bytes = 0
 
-        sample_count = len(self.audio) // 2
-        if not force and sample_count < self.MIN_INFERENCE_BYTES // 2:
+        segment_seconds = len(self._segment) / (SAMPLE_RATE * SAMPLE_WIDTH)
+        silence_seconds = self._silent_audio_bytes / (SAMPLE_RATE * SAMPLE_WIDTH)
+        speech_seconds = self._speech_bytes / (SAMPLE_RATE * SAMPLE_WIDTH)
+        if speech_seconds >= self.MIN_SEGMENT_SECONDS and (
+            silence_seconds >= self.SILENCE_COMMIT_SECONDS
+            or segment_seconds >= self.MAX_SEGMENT_SECONDS
+        ):
+            return self._decode_segment()
+        return None
+
+    async def push_demo_text(self, text: str) -> str | None:
+        raise RuntimeError("mock_text is available only with ASR_BACKEND=mock")
+
+    async def finalize(self) -> str:
+        if self.__class__._model is None:
+            raise RuntimeError("Session not started; call start_session() first.")
+        if self._speech_bytes / (SAMPLE_RATE * SAMPLE_WIDTH) >= 0.2:
+            self._decode_segment()
+        else:
+            self._segment.clear()
+            self._speech_bytes = 0
+            self._silent_audio_bytes = 0
+        return self._committed
+
+    async def reset(self) -> None:
+        self._segment.clear()
+        self._speech_bytes = 0
+        self._silent_audio_bytes = 0
+        self._committed = ""
+        self._pending_commit = False
+
+    @property
+    def pending_commit(self) -> bool:
+        return self._pending_commit
+
+    @property
+    def cumulative_text(self) -> str:
+        return self._committed
+
+    def consume_pending_commit(self) -> str:
+        self._pending_commit = False
+        return self._committed
+
+    def _decode_segment(self) -> str | None:
+        """Decode the current segment exactly once and append it."""
+        waveform = _pcm16_to_float32(bytes(self._segment))
+        self._segment.clear()
+        self._speech_bytes = 0
+        self._silent_audio_bytes = 0
+        if waveform.size == 0:
             return None
-
-        self.last_inference_size = len(self.audio)
-        self._inference_count += 1
-
-        try:
-            result = self._transcribe_bytes(self.audio)
-            if isinstance(result, tuple):
-                result, words = result
-            else:
-                # Keep compatibility with test doubles and model adapters
-                # that only return plain text.
-                words = []
-            self._last_error = None
-            self._last_buffer_text = result
-            self._last_buffer_words = words
-            if words:
-                self._observe_words(words)
-            # Every inference is a revised hypothesis for the current audio
-            # window. Return it as a replacement, never as an append-only
-            # delta; only committed/final text is allowed to accumulate.
-            return result
-        except Exception as exc:
-            error_msg = f"Inference #{self._inference_count} failed: {exc}"
-            logger.error(error_msg, exc_info=True)
-            self._last_error = error_msg
-            self.audio.clear()
-            self.last_inference_size = 0
-            raise RuntimeError(error_msg) from exc
-
-    def _transcribe_bytes(self, audio_bytes: bytes) -> tuple[str, list[dict]]:
-        import numpy as np
-
-        sample_count = len(audio_bytes) // 2
-        samples = struct.unpack(f"<{sample_count}h", audio_bytes[:sample_count * 2])
-        waveform = np.asarray(samples, dtype=np.float32) / 32768.0
-
-        # Parakeet exposes word timestamps through Hypothesis.timestamp.
-        # They let us align rolling windows by audio time instead of guessing
-        # overlap from text that may be revised or repeated during silence.
-        try:
-            result = self.__class__._model.transcribe(
-                [waveform], batch_size=1, timestamps=True
-            )
-        except TypeError:
-            # Older NeMo builds may not accept timestamps in this call path.
-            result = self.__class__._model.transcribe([waveform], batch_size=1)
-        output = result[0] if isinstance(result, list) else result
-        text = getattr(output, "text", str(output)).strip()
-
-        timestamp_data = getattr(output, "timestamp", None)
-        raw_words = timestamp_data.get("word", []) if isinstance(timestamp_data, dict) else []
-        words = []
-        for stamp in raw_words or []:
-            if not isinstance(stamp, dict):
-                continue
-            word = str(stamp.get("word", stamp.get("text", ""))).strip()
-            if not word:
-                continue
-            start = self._timestamp_float(stamp.get("start"))
-            end = self._timestamp_float(stamp.get("end", stamp.get("start")))
-            if start is None or end is None:
-                continue
-            words.append({
-                "word": word,
-                "start": self._audio_offset_seconds + start,
-                "end": self._audio_offset_seconds + max(start, end),
-            })
-        return text, words
-
-    @staticmethod
-    def _timestamp_float(value) -> float | None:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
+        with self.__class__._model_lock:
+            hyps = self.__class__._model.transcribe([waveform])
+        text = _extract_text(hyps)
+        if not text:
             return None
+        previous = self._committed
+        self._committed = f"{previous} {text}".strip() if previous else text
+        self._pending_commit = self._committed != previous
+        return text

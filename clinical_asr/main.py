@@ -10,7 +10,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .backends import MockStreamingASR, ParakeetStreamingASR
+from .backends import MockStreamingASR, NemoCacheAwareStreamingASR, VadSegmentedOfflineASR
 from .config import Settings
 from .events import TranscriptEvent
 from .resolver import TerminologyResolver
@@ -49,7 +49,24 @@ async def voice() -> FileResponse:
 
 
 def make_backend():
-    return ParakeetStreamingASR(settings.model_name, settings.model_path, settings.device) if settings.backend == "parakeet" else MockStreamingASR()
+    if settings.backend in ("nemotron", "nemo-streaming", "streaming"):
+        return NemoCacheAwareStreamingASR(
+            settings.model_name,
+            settings.model_path,
+            settings.device,
+            right_context=settings.chunk_right_context,
+            models_dir=settings.models_dir,
+        )
+    if settings.backend in ("offline", "parakeet", "onnx"):
+        # "parakeet"/"onnx" are legacy names for the same VAD-segmented
+        # single-decode path over a local offline .nemo file.
+        return VadSegmentedOfflineASR(
+            settings.model_name,
+            settings.model_path,
+            settings.device,
+            models_dir=settings.models_dir,
+        )
+    return MockStreamingASR()
 
 
 async def run_backend(operation, *args):
