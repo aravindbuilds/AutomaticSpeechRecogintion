@@ -137,9 +137,10 @@ class TestNemoCacheAwareCommitLogic:
         monkeypatch.setattr(su, "CacheAwareStreamingAudioBuffer", lambda *a, **k: mock_buf)
         monkeypatch.setattr(bl, "ensure_local_checkpoint", lambda *a, **k: Path("stub.nemo"))
 
-        mock_model = MagicMock()
+        mock_model = Mock()  # no auto-created attributes
+        mock_model.encoder = MagicMock()
         mock_model.encoder.get_initial_cache_state.return_value = (None, None, None)
-        mock_model.conformer_stream_step = True
+        mock_model.conformer_stream_step = True  # so _ensure_model accepts it
         monkeypatch.setattr(bl, "_load_nemo_model", lambda *a, **k: mock_model)
 
         backend = NemoCacheAwareStreamingASR("test-model")
