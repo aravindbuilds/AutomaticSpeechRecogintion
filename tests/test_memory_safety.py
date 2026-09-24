@@ -126,18 +126,49 @@ class TestNemoCacheAwareCommitLogic:
         backend._promote_commit()
         assert backend.cumulative_text == "see you soon"
 
-    def test_push_without_session_raises(self):
+    def test_push_auto_starts_session(self, monkeypatch):
+        """push_audio auto-initializes the session instead of raising."""
+        import clinical_asr.backends as bl
+        from unittest.mock import MagicMock, Mock
+        import nemo.collections.asr.parts.utils.streaming_utils as su
+
+        mock_buf = MagicMock()
+        mock_buf.buffer = None
+        monkeypatch.setattr(su, "CacheAwareStreamingAudioBuffer", lambda *a, **k: mock_buf)
+        monkeypatch.setattr(bl, "ensure_local_checkpoint", lambda *a, **k: Path("stub.nemo"))
+
+        mock_model = MagicMock()
+        mock_model.encoder.get_initial_cache_state.return_value = (None, None, None)
+        mock_model.conformer_stream_step = True
+        monkeypatch.setattr(bl, "_load_nemo_model", lambda *a, **k: mock_model)
+
         backend = NemoCacheAwareStreamingASR("test-model")
-        with pytest.raises(RuntimeError):
-            asyncio.run(backend.push_audio(LOUD))
+        result = asyncio.run(backend.push_audio(LOUD))
+        assert result is None  # silent stub model → no words
 
     def test_requires_streaming_model(self, monkeypatch):
-        import clinical_asr.backends as backends
+        import clinical_asr.backends as bl
+        from unittest.mock import MagicMock
+        import nemo.collections.asr.parts.utils.streaming_utils as su
 
-        monkeypatch.setattr(
-            backends, "ensure_local_checkpoint", lambda *a, **k: Path("stub.nemo")
-        )
-        monkeypatch.setattr(backends, "_load_nemo_model", lambda *a, **k: object())
+        # Reset class-level cached model so _ensure_model actually checks this model
+        bl.NemoCacheAwareStreamingASR._model = None
+        bl.NemoCacheAwareStreamingASR._model_key = None
+
+        mock_buf = MagicMock()
+        mock_buf.buffer = None
+        monkeypatch.setattr(su, "CacheAwareStreamingAudioBuffer", lambda *a, **k: mock_buf)
+        monkeypatch.setattr(bl, "ensure_local_checkpoint", lambda *a, **k: Path("stub.nemo"))
+
+        # Plain class — no auto-created attributes like Mock does
+        class FakeModel:
+            def __init__(self):
+                import unittest.mock as um
+                self.encoder = um.MagicMock()
+                self.encoder.get_initial_cache_state.return_value = (None, None, None)
+
+        monkeypatch.setattr(bl, "_load_nemo_model", lambda *a, **k: FakeModel())
+
         backend = NemoCacheAwareStreamingASR("nvidia/offline-only-checkpoint")
         with pytest.raises(RuntimeError, match="conformer_stream_step"):
             asyncio.run(backend.start_session())

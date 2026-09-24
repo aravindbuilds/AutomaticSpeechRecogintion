@@ -367,8 +367,13 @@ class NemoCacheAwareStreamingASR(StreamingASR):
             self.__class__._model_key = key
 
     async def push_audio(self, audio_chunk: bytes) -> str | None:
+        """Feed one PCM16 chunk into the cache-aware streaming buffer.
+
+        If the session was reset or not yet started, this call re-initialises
+        it automatically so the backend is resilient to reset-then-push races.
+        """
         if self._buffer is None:
-            raise RuntimeError("Session not started; call start_session() first.")
+            await self.start_session()
         if not audio_chunk:
             return None
         if _rms(audio_chunk) < self.SILENCE_RMS_THRESHOLD:
@@ -395,6 +400,10 @@ class NemoCacheAwareStreamingASR(StreamingASR):
         raise RuntimeError("mock_text is available only with ASR_BACKEND=mock")
 
     async def finalize(self) -> str:
+        """Promote any remaining hypothesis and return the full cumulative transcript."""
+        if self._buffer is not None and self._buffer.buffer is None:
+            # Session was started but no audio was ever pushed; nothing to finalize.
+            return self._committed
         if self._buffer is None:
             raise RuntimeError("Session not started; call start_session() first.")
         with self.__class__._step_lock:
@@ -426,6 +435,8 @@ class NemoCacheAwareStreamingASR(StreamingASR):
         import torch
 
         model = self.__class__._model
+        if self._buffer.buffer is None:
+            return  # No audio appended yet; nothing to drain
         for chunk_audio, chunk_lengths in self._buffer:
             drop_extra = (
                 0
